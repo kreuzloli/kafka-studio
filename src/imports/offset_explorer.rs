@@ -1,13 +1,19 @@
-//! 外部连接配置导入。
+//! Offset Explorer XML 的离线结构解析与内部目录 ID 转换。
+
+use std::collections::{HashMap, HashSet};
 
 use quick_xml::{
     Reader, XmlVersion,
     events::{BytesStart, Event},
 };
+use uuid::Uuid;
 
 use crate::{
     enums::ImportError,
-    models::{ConnectionImport, ImportedConnection, ImportedFolder},
+    models::{
+        Connection, ConnectionFolder, ConnectionFolderId, ConnectionImport, ImportedConnection,
+        ImportedFolder,
+    },
 };
 
 /// 检查必填属性；只判断空白，不修改原始有效文本。
@@ -33,8 +39,13 @@ pub(crate) fn parse_connection(
 
     for attr in element.attributes() {
         let attr = attr.map_err(quick_xml::Error::from)?;
+        let key = attr.key.as_ref();
+        // 只解码本阶段使用的属性，忽略无关字段的值。
+        if !matches!(key, "name" | "bootstrap_servers" | "groupId" | "group") {
+            continue;
+        }
         let value = attr.normalized_value(version)?.into_owned();
-        match attr.key.as_ref() {
+        match key {
             "name" => name = Some(value),
             "bootstrap_servers" => bootstrap_servers = Some(value),
             "groupId" => conn.folder_external_id = Some(value),
@@ -58,8 +69,12 @@ fn parse_folder(
     let mut name = None::<String>;
     for attr in element.attributes() {
         let attr = attr.map_err(quick_xml::Error::from)?;
+        let key = attr.key.as_ref();
+        if !matches!(key, "id" | "name") {
+            continue;
+        }
         let value = attr.normalized_value(version)?.into_owned();
-        match attr.key.as_ref() {
+        match key {
             "id" => external_id = Some(value),
             "name" => name = Some(value),
             _ => {}
@@ -71,14 +86,67 @@ fn parse_folder(
     Ok(folder)
 }
 
-/// 收集连接与目录记录；文件结构和引用完整性校验将在后续补充。
+/// 离线收集连接与目录，校验根节点、已知节点层级及目录 ID 唯一性。
+///
+/// 未知子树整体忽略；连接的目录引用留到转换时处理，不读取认证或证书资源。
 fn parse_import(xml: &str) -> Result<ConnectionImport, ImportError> {
     let mut reader = Reader::from_str(xml);
     let mut version = XmlVersion::Implicit1_0;
+    // 目录栈只描述业务父子关系，元素栈另外负责 XML 层级校验。
     let mut folder_stack = Vec::<String>::new();
     let mut res = ConnectionImport::new();
+    let mut root_seen = false;
+    let mut element_stack = Vec::<String>::new();
     loop {
-        match reader.read_event()? {
+        let event = reader.read_event()?;
+        // 先借用事件验证结构，再消费同一事件生成业务记录。
+        match &event {
+            Event::Start(e) | Event::Empty(e) => {
+                let e_name = e.name();
+                let name = e_name.as_ref();
+                match element_stack.last().map(String::as_str) {
+                    None => {
+                        if root_seen {
+                            return Err(ImportError::InvalidStructure);
+                        }
+                        if name != "connections" {
+                            return Err(ImportError::InvalidRoot);
+                        }
+                        root_seen = true;
+                    }
+                    Some(parent) => {
+                        // 整体跳过未知子树，避免把扩展内容中的同名标签当成连接或目录。
+                        if !matches!(name, "connections" | "connection" | "groups" | "group") {
+                            if matches!(&event, Event::Start(_)) {
+                                reader.read_to_end(e.name())?;
+                            }
+                            continue;
+                        }
+                        let allowed = matches!(
+                            (parent, name),
+                            ("connections", "connection" | "groups")
+                                | ("groups" | "group", "group")
+                        );
+                        if !allowed {
+                            return Err(ImportError::InvalidStructure);
+                        }
+                    }
+                }
+                // 自闭合标签没有对应的 End 事件，因此不入栈。
+                if matches!(&event, Event::Start(_)) {
+                    element_stack.push(name.to_owned());
+                }
+            }
+            Event::End(e) => {
+                let e_name = e.name();
+                if element_stack.last().map(String::as_str) != Some(e_name.as_ref()) {
+                    return Err(ImportError::InvalidStructure);
+                }
+                element_stack.pop();
+            }
+            _ => {}
+        }
+        match event {
             Event::Start(e) if e.name().as_ref() == "group" => {
                 let folder = parse_folder(&e, version, folder_stack.last().cloned())?;
                 folder_stack.push(folder.external_id.clone());
@@ -102,16 +170,92 @@ fn parse_import(xml: &str) -> Result<ConnectionImport, ImportError> {
             _ => {}
         }
     }
+    if !root_seen {
+        return Err(ImportError::MissingRoot);
+    }
+    if !element_stack.is_empty() {
+        return Err(ImportError::InvalidStructure);
+    }
+    // 重复外部 ID 会让后续映射覆盖旧值，必须在转换前拒绝。
+    let mut folder_ids = HashSet::<&str>::new();
+    for folder in &res.folders {
+        if !folder_ids.insert(folder.external_id.as_str()) {
+            return Err(ImportError::DuplicateFolderId(folder.external_id.clone()));
+        }
+    }
+    // 只记录汇总数量，不输出 XML、属性值或底层错误原文。
+    eprintln!(
+        "[kafka-studio] event=import_parsed connections={} folders={}",
+        res.connections.len(),
+        res.folders.len()
+    );
     Ok(res)
+}
+
+/// 消费已通过解析校验的记录，为本次导入生成独立的内部目录 ID。
+///
+/// 保留空目录与原有顺序；连接引用的目录不存在时，保留连接并放入未分组区域。
+fn convert_import(imported: ConnectionImport) -> (Vec<ConnectionFolder>, Vec<Connection>) {
+    let mut folder_ids = HashMap::<String, ConnectionFolderId>::new();
+    let mut folders = Vec::<ConnectionFolder>::new();
+    let mut connections = Vec::<Connection>::new();
+    // 先完整建立映射，父子引用转换不依赖目录在输入中的先后顺序。
+    for folder in imported.folders.iter() {
+        let connection_folder_id = ConnectionFolderId(Uuid::new_v4().to_string());
+        folder_ids.insert(folder.external_id.clone(), connection_folder_id);
+    }
+    // 按值迭代会移动字段，避免复制目录名称等自有字符串。
+    for folder in imported.folders {
+        // 上一轮已为每个目录插入 ID，因此这里可以直接索引。
+        let id = folder_ids[&folder.external_id].clone();
+        let parent_id = folder
+            .parent_external_id
+            .as_ref()
+            .and_then(|id| folder_ids.get(id))
+            .cloned();
+        folders.push(ConnectionFolder {
+            id,
+            name: folder.name,
+            parent_id,
+        });
+    }
+
+    for (connection_index, conn) in imported.connections.into_iter().enumerate() {
+        let folder_id = conn
+            .folder_external_id
+            .as_ref()
+            .and_then(|id| folder_ids.get(id))
+            .cloned();
+        // 区分原本未分组与引用丢失；日志只使用本次导入中的序号。
+        if conn.folder_external_id.is_some() && folder_id.is_none() {
+            eprintln!(
+                "[kafka-studio] event=import_folder_reference_missing connection_index={connection_index}"
+            );
+        }
+        connections.push(Connection {
+            name: conn.name,
+            bootstrap_servers: conn.bootstrap_servers,
+            folder_id,
+        });
+    }
+
+    eprintln!(
+        "[kafka-studio] event=import_converted connections={} folders={}",
+        connections.len(),
+        folders.len()
+    );
+    (folders, connections)
 }
 
 #[cfg(test)]
 mod tests {
 
+    use std::collections::HashMap;
+
     use crate::{
         enums::ImportError,
-        imports::offset_explorer::{parse_folder, parse_import},
-        models::ImportedFolder,
+        imports::offset_explorer::{convert_import, parse_folder, parse_import},
+        models::{Connection, ConnectionFolder, ConnectionFolderId, ImportedFolder},
     };
 
     use super::parse_connection;
@@ -306,5 +450,230 @@ mod tests {
     fn rejects_unknown_xml_version() {
         let xml = r#"<?xml version="9.9"?><connections />"#;
         assert!(matches!(parse_import(xml), Err(ImportError::Xml(_))));
+    }
+
+    /// 区分缺少根节点、根节点名称错误和合法空文件。
+    #[test]
+    fn checks_import_root() -> Result<(), ImportError> {
+        assert!(matches!(parse_import(""), Err(ImportError::MissingRoot)));
+        assert!(matches!(
+            parse_import("<settings />"),
+            Err(ImportError::InvalidRoot)
+        ));
+        let result = parse_import("<connections />")?;
+        assert!(result.connections.is_empty());
+        assert!(result.folders.is_empty());
+        Ok(())
+    }
+
+    /// 拒绝未闭合、多根及已知节点位置错误的结构。
+    #[test]
+    fn rejects_invalid_import_structure() {
+        let cases = [
+            // 根元素没有闭合。
+            "<connections>",
+            // 一份文件出现两个根元素。
+            "<connections /><connections />",
+            // 连接位于根元素外。
+            r#"<connections />
+               <connection name="Demo" bootstrap_servers="localhost:9092" />"#,
+            // 目录应位于 groups 或另一个 group 内。
+            r#"<connections>
+                   <group id="1" name="Development" />
+               </connections>"#,
+        ];
+
+        for xml in cases {
+            assert!(
+                parse_import(xml).is_err(),
+                "Expected invalid structure to be rejected: {xml}"
+            );
+        }
+    }
+
+    /// 防止同一外部目录 ID 在转换时覆盖已有映射。
+    #[test]
+    fn rejects_duplicate_folder_ids() {
+        let xml = r#"
+            <connections>
+                <groups>
+                    <group id="1" name="Development" />
+                    <group id="1" name="Production" />
+                </groups>
+            </connections>
+        "#;
+
+        assert!(matches!(
+            parse_import(xml),
+            Err(ImportError::DuplicateFolderId(id)) if id == "1"
+        ));
+    }
+
+    /// 无关属性不参与解码，避免其未知实体阻断基础字段导入。
+    #[test]
+    fn ignores_unused_attribute_values() -> Result<(), ImportError> {
+        let xml = r#"
+            <connections>
+                <connection
+                    name="Demo"
+                    bootstrap_servers="localhost:9092"
+                    groupId="1"
+                    unused="&custom;" />
+                <groups>
+                    <group id="1" name="Development" unused="&custom;" />
+                </groups>
+            </connections>
+        "#;
+
+        let result = parse_import(xml)?;
+
+        assert_eq!(result.connections.len(), 1);
+        assert_eq!(result.connections[0].name, "Demo");
+        assert_eq!(
+            result.connections[0].folder_external_id.as_deref(),
+            Some("1")
+        );
+        assert_eq!(result.folders.len(), 1);
+        assert_eq!(result.folders[0].external_id, "1");
+
+        Ok(())
+    }
+
+    /// 未知子树中的同名业务标签不能混入导入结果。
+    #[test]
+    fn ignores_unknown_elements() -> Result<(), ImportError> {
+        let xml = r#"
+            <connections>
+                <metadata>
+                    <connection name="Example" />
+                    <group id="unused" name="Example folder" />
+                </metadata>
+                <extra />
+                <connection name="Demo" bootstrap_servers="localhost:9092" />
+            </connections>
+        "#;
+
+        let result = parse_import(xml)?;
+
+        assert_eq!(result.connections.len(), 1);
+        assert_eq!(result.connections[0].name, "Demo");
+        assert!(result.folders.is_empty());
+
+        Ok(())
+    }
+
+    /// 验证内部 ID 同时替换父目录引用和连接归属，并保留空目录。
+    #[test]
+    fn maps_external_folder_ids() -> Result<(), ImportError> {
+        let xml = include_str!("../../tests/fixtures/offset_explorer_basic.xml");
+        let imported = parse_import(xml)?;
+        let (folders, connections) = convert_import(imported);
+
+        assert_eq!(folders.len(), 3);
+        assert_eq!(folders[0].name, "Development");
+        assert_eq!(folders[0].parent_id, None);
+
+        assert_eq!(folders[1].name, "Local");
+        assert_eq!(folders[1].parent_id.as_ref(), Some(&folders[0].id));
+
+        assert_eq!(folders[2].name, "Empty");
+        assert_eq!(folders[2].parent_id, None);
+
+        assert_eq!(connections.len(), 1);
+        assert_eq!(connections[0].name, "Local Demo");
+        assert_eq!(connections[0].bootstrap_servers, "localhost:9092");
+        assert_eq!(connections[0].folder_id.as_ref(), Some(&folders[1].id));
+
+        Ok(())
+    }
+
+    /// 重复导入同一文件也应生成独立 ID，避免不同批次目录混用。
+    #[test]
+    fn assigns_new_folder_ids_for_each_import() -> Result<(), ImportError> {
+        let xml = include_str!("../../tests/fixtures/offset_explorer_basic.xml");
+
+        let (first_folders, first_connections) = convert_import(parse_import(xml)?);
+        let (second_folders, second_connections) = convert_import(parse_import(xml)?);
+
+        for first in &first_folders {
+            assert!(second_folders.iter().all(|second| first.id != second.id));
+        }
+
+        assert_eq!(
+            first_connections[0].folder_id.as_ref(),
+            Some(&first_folders[1].id)
+        );
+        assert_eq!(
+            second_connections[0].folder_id.as_ref(),
+            Some(&second_folders[1].id)
+        );
+
+        Ok(())
+    }
+
+    /// 目录引用缺失时只取消分组，不丢弃连接。
+    #[test]
+    fn keeps_connection_when_folder_is_missing() -> Result<(), ImportError> {
+        let xml = r#"
+            <connections>
+                <connection
+                    name="Demo"
+                    bootstrap_servers="localhost:9092"
+                    groupId="missing" />
+            </connections>
+        "#;
+
+        let (folders, connections) = convert_import(parse_import(xml)?);
+
+        assert!(folders.is_empty());
+        assert_eq!(connections.len(), 1);
+        assert_eq!(connections[0].name, "Demo");
+        assert_eq!(connections[0].bootstrap_servers, "localhost:9092");
+        assert_eq!(connections[0].folder_id, None);
+
+        Ok(())
+    }
+
+    /// 用四连接、八目录样例检查完整层级、空目录和未分组连接。
+    #[test]
+    fn converts_nested_import() -> Result<(), ImportError> {
+        let xml = include_str!("../../tests/fixtures/offset_explorer_nested.xml");
+        let (folders, connections) = convert_import(parse_import(xml)?);
+        assert_eq!(folders.len(), 8);
+        assert_eq!(connections.len(), 4);
+        // XML 中的目录按先父后子的顺序收集。
+        let expected_folders: [(&str, Option<usize>); 8] = [
+            ("Clusters", None),
+            ("Development", Some(0)),
+            ("Local", Some(1)),
+            ("Shared", Some(1)),
+            ("Production", Some(0)),
+            ("Region A", Some(4)),
+            ("Empty Region", Some(4)),
+            ("Archive", None),
+        ];
+        for (folder, (name, parent_index)) in folders.iter().zip(expected_folders) {
+            assert_eq!(folder.name, name);
+            assert_eq!(
+                folder.parent_id.as_ref(),
+                parent_index.map(|index| &folders[index].id)
+            );
+        }
+        let expected_connections: [(&str, Option<usize>); 4] = [
+            ("Local", Some(2)),
+            ("Dev", Some(3)),
+            ("Production", Some(5)),
+            ("Standalone", None),
+        ];
+
+        for (connection, (name, folder_index)) in connections.iter().zip(expected_connections) {
+            assert_eq!(connection.name, name);
+            assert_eq!(
+                connection.folder_id.as_ref(),
+                folder_index.map(|index| &folders[index].id)
+            );
+        }
+
+        Ok(())
     }
 }

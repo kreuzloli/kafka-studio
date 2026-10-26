@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<connections>
+    <connection name="Local" bootstrap_servers="localhost:9092" groupId="3" />
+    <connection name="Dev" bootstrap_servers="dev.example.invalid:9092" groupId="4" />
+    <connection name="Production" bootstrap_servers="prod.example.invalid:9092" groupId="6" />
+    <connection name="Standalone" bootstrap_servers="standalone.example.invalid:9092" />
+
+    <groups>
+        <group id="1" name="Clusters">
+            <group id="2" name="Development">
+                <group id="3" name="Local" />
+                <group id="4" name="Shared" />
+            </group>
+            <group id="5" name="Production">
+                <group id="6" name="Region A" />
+                <group id="7" name="Empty Region" />
+            </group>
+        </group>
+        <group id="8" name="Archive" />
+    </groups>
+</connections>
