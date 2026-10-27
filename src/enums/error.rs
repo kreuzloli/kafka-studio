@@ -23,4 +23,22 @@ impl From<quick_xml::Error> for ImportError {
 }
 
 /// 第 7 讲的错误类型骨架；后续按解析失败类别补充，不携带凭据原文。
-pub(crate) enum JaasError {}
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum JaasError {
+    /// 应该遇到开引号，但没有	demo，或者空输入
+    ExpectedQuote,
+    /// 已经读到开引号，但直到末尾都没有闭引号	'demo
+    UnterminatedQuote,
+    /// 读到了反斜杠，但后面没有字符，转义没写完	'demo\
+    IncompleteEscape,
+    /// 反斜杠后面有字符，但不在我们支持的转义范围内	'demo\n'
+    UnsupportedEscape,
+    /// 当前位置应有未加引号的单词，但遇到了分隔符或输入结束。
+    ExpectedWord,
+    /// 模块名不在当前支持范围内；目前仅支持完整的 ScramLoginModule 类名。
+    UnsupportedModule,
+    /// 控制标记不在当前支持范围内；目前仅支持 required。
+    UnsupportedControlFlag,
+    /// 属性后面不是 '='
+    ExpectedEquals,
+}
