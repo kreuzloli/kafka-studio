@@ -156,6 +156,8 @@ fn parse_scram_jaas(input: &str) -> Result<ScramCredentials, JaasError> {
 
 #[cfg(test)]
 mod tests {
+    use quick_xml::{Reader, events::Event, reader};
+
     use crate::{
         enums::JaasError::{
             self, ExpectedQuote, ExpectedWord, IncompleteEscape, UnsupportedEscape,
@@ -165,6 +167,7 @@ mod tests {
             MODULE_FLAG, MODULE_NAME, parse_scram_header, parse_scram_jaas, read_option,
             read_quoted_value, read_word, skip_whitespace,
         },
+        models::ScramCredentials,
     };
 
     #[test]
@@ -382,9 +385,29 @@ mod tests {
 
     #[test]
     fn decodes_xml_entities_once() -> Result<(), Box<dyn std::error::Error>> {
+        let mut res = None::<ScramCredentials>;
         let xml = r#"
         <connection jaas_config="org.apache.kafka.common.security.scram.ScramLoginModule required username=&quot;demo&quot; password=&quot;a&amp;b&amp;amp;c&quot;;" />
         "#;
+        let mut reader = Reader::from_str(xml.trim());
+        let event = reader.read_event()?;
+        match &event {
+            Event::Empty(e) => {
+                for attr in e.attributes() {
+                    let attr = attr.map_err(quick_xml::Error::from)?;
+                    if attr.key.as_ref() == "jaas_config" {
+                        let jaas = attr
+                            .normalized_value(quick_xml::XmlVersion::Implicit1_0)?
+                            .into_owned();
+                        res = Some(parse_scram_jaas(&jaas)?);
+                    }
+                }
+            }
+            _ => {}
+        }
+        let credentials = res.expect("Expected jaas_config credentials");
+        assert_eq!(credentials.username, "demo");
+        assert_eq!(credentials.password, "a&b&amp;c");
         Ok(())
     }
 }

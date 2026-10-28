@@ -1,3 +1,6 @@
+use std::error::Error;
+use std::fmt;
+
 /// 区分 XML 解析、必填属性、文档结构及目录标识冲突。
 /// 底层错误与外部 ID 可能包含输入内容，不应直接写入生产日志。
 #[derive(Debug)]
@@ -54,3 +57,11 @@ pub(crate) enum JaasError {
     /// 结束分号之后仍有非空白内容；当前不支持多个模块。
     TrailingContent,
 }
+
+impl fmt::Display for JaasError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl Error for JaasError {}
