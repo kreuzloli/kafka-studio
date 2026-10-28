@@ -1,4 +1,6 @@
-use crate::enums::JaasError;
+use std::{char, f64::consts::E};
+
+use crate::{enums::JaasError, models::ScramCredentials};
 
 pub(super) const MODULE_NAME: &str = "org.apache.kafka.common.security.scram.ScramLoginModule";
 pub(super) const MODULE_FLAG: &str = "required";
@@ -71,7 +73,7 @@ fn read_word(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Result<Str
 /// 校验单模块 SCRAM 配置的开头，保留控制标记之后的分隔符。
 fn parse_scram_header(
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
-) -> Result<(), JaasError> {
+) -> Result<(String, String), JaasError> {
     // 读取模块
     skip_whitespace(chars);
     let module = read_word(chars)?;
@@ -84,7 +86,7 @@ fn parse_scram_header(
     if flag != MODULE_FLAG {
         return Err(JaasError::UnsupportedControlFlag);
     }
-    Ok(())
+    Ok((module, flag))
 }
 
 /// 读取一个带引号值的键值项，停在值的闭引号之后。
@@ -107,6 +109,51 @@ fn read_option(
     Ok((field, value))
 }
 
+fn parse_scram_jaas(input: &str) -> Result<ScramCredentials, JaasError> {
+    let mut username = None::<String>;
+    let mut password = None::<String>;
+    let mut chars = input.chars().peekable();
+    parse_scram_header(&mut chars)?;
+    loop {
+        let has_whitespace = chars.peek().is_some_and(|c| c.is_whitespace());
+        skip_whitespace(&mut chars);
+        match chars.peek().copied() {
+            Some(';') => {
+                chars.next();
+                break;
+            }
+            Some(_) => {}
+            None => return Err(JaasError::MissingSemicolon),
+        }
+        if !has_whitespace {
+            return Err(JaasError::ExpectedWhitespace);
+        }
+        let (field, value) = read_option(&mut chars)?;
+        match field.to_lowercase().as_str() {
+            "username" => {
+                if username.is_some() {
+                    return Err(JaasError::DuplicateOption);
+                }
+                username = Some(value);
+            }
+            "password" => {
+                if password.is_some() {
+                    return Err(JaasError::DuplicateOption);
+                }
+                password = Some(value);
+            }
+            _ => {}
+        }
+    }
+    skip_whitespace(&mut chars);
+    if chars.peek().is_some() {
+        return Err(JaasError::TrailingContent);
+    }
+    let username = username.ok_or(JaasError::MissingUsername)?;
+    let password = password.ok_or(JaasError::MissingPassword)?;
+    Ok(ScramCredentials::new(username, password))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{
@@ -115,7 +162,8 @@ mod tests {
             UnterminatedQuote,
         },
         imports::jaas::{
-            parse_scram_header, read_option, read_quoted_value, read_word, skip_whitespace,
+            MODULE_FLAG, MODULE_NAME, parse_scram_header, parse_scram_jaas, read_option,
+            read_quoted_value, read_word, skip_whitespace,
         },
     };
 
@@ -175,8 +223,7 @@ mod tests {
 
         for (input, remaining) in cases {
             let mut chars = input.chars().peekable();
-
-            assert_eq!(parse_scram_header(&mut chars), Ok(()));
+            assert!(parse_scram_header(&mut chars).is_ok());
             // 开头校验不能消费后续字段或字段前的分隔符。
             assert_eq!(chars.collect::<String>(), remaining);
         }
@@ -268,5 +315,76 @@ mod tests {
             assert_eq!(word, expected);
             assert_eq!(next, chars.peek().copied());
         }
+    }
+
+    #[test]
+    fn parses_scram_credentials() -> Result<(), JaasError> {
+        let options = [
+            ("username='demo' password='Demo Pass';", "Demo Pass"),
+            ("PASSWORD='Demo Pass' UserName='demo';", "Demo Pass"),
+            (
+                "username='demo' extra='a=b;c' password='Demo Pass';",
+                "Demo Pass",
+            ),
+            ("username='demo' password='p'  ; \t\n", "p"),
+            ("username='demo' password='p' extra='x';", "p"),
+            ("username='demo' password=' p ';", " p "),
+        ];
+
+        for (option, expected_password) in options {
+            let input = format!("{MODULE_NAME} {MODULE_FLAG} {option}");
+            let credentials = parse_scram_jaas(&input)?;
+
+            assert_eq!(credentials.username, "demo");
+            assert_eq!(credentials.password, expected_password);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_scram_configuration() {
+        let cases = [
+            (";", JaasError::MissingUsername),
+            (
+                "username='demo' password='p' extra='unfinished",
+                JaasError::UnterminatedQuote,
+            ),
+            (
+                "username='a' UserName='b' password='p';",
+                JaasError::DuplicateOption,
+            ),
+            (
+                "username='a' password='p' PASSWORD='q';",
+                JaasError::DuplicateOption,
+            ),
+            ("password='p';", JaasError::MissingUsername),
+            ("username='a';", JaasError::MissingPassword),
+            ("username='a' password='p'", JaasError::MissingSemicolon),
+            ("username='a'password='p';", JaasError::ExpectedWhitespace),
+            (
+                "username='a' password='p'; extra='x'",
+                JaasError::TrailingContent,
+            ),
+            (
+                "username='a' password='p' extra=;",
+                JaasError::ExpectedQuote,
+            ),
+        ];
+        for (option, expected) in cases {
+            let input = format!("{MODULE_NAME} {MODULE_FLAG} {option}");
+            match parse_scram_jaas(&input) {
+                Err(actual) => assert_eq!(actual, expected),
+                Ok(_) => panic!("Expected invalid configuration to be rejected"),
+            }
+        }
+    }
+
+    #[test]
+    fn decodes_xml_entities_once() -> Result<(), Box<dyn std::error::Error>> {
+        let xml = r#"
+        <connection jaas_config="org.apache.kafka.common.security.scram.ScramLoginModule required username=&quot;demo&quot; password=&quot;a&amp;b&amp;amp;c&quot;;" />
+        "#;
+        Ok(())
     }
 }

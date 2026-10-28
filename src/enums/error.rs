@@ -41,4 +41,16 @@ pub(crate) enum JaasError {
     UnsupportedControlFlag,
     /// 属性后面不是 '='
     ExpectedEquals,
+    /// 同一个凭据字段重复出现，不能静默覆盖。
+    DuplicateOption,
+    /// 配置中缺少 username 字段。
+    MissingUsername,
+    /// 配置中缺少 password 字段。
+    MissingPassword,
+    /// 输入结束时仍未读到配置的结束分号。
+    MissingSemicolon,
+    /// 相邻键值项之间缺少必要的空白分隔。
+    ExpectedWhitespace,
+    /// 结束分号之后仍有非空白内容；当前不支持多个模块。
+    TrailingContent,
 }
