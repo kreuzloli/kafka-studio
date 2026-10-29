@@ -62,11 +62,13 @@ impl KafkaStudio {
                     name: String::from("Local Demo"),
                     bootstrap_servers: String::from("localhost:9092"),
                     folder_id: Some(development_id.clone()),
+                    credentials: None,
                 },
                 Connection {
                     name: String::from("Test Demo"),
                     bootstrap_servers: String::from("test.example:9092"),
                     folder_id: None,
+                    credentials: None,
                 },
             ],
             name_input,
@@ -238,6 +240,7 @@ impl KafkaStudio {
             name,
             bootstrap_servers: String::from("localhost:9092"),
             folder_id: None,
+            credentials: None,
         });
 
         self.expanded = true;

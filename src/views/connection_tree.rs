@@ -94,16 +94,19 @@ mod tests {
                 name: "Root connection".to_owned(),
                 bootstrap_servers: "localhost:9092".to_owned(),
                 folder_id: None,
+                credentials: None,
             },
             Connection {
                 name: "Nested connection".to_owned(),
                 bootstrap_servers: "localhost:9093".to_owned(),
                 folder_id: Some(local_id),
+                credentials: None,
             },
             Connection {
                 name: "Development connection".to_owned(),
                 bootstrap_servers: "localhost:9094".to_owned(),
                 folder_id: Some(development_id),
+                credentials: None,
             },
         ];
         let mut collapsed_folders = HashSet::<ConnectionFolderId>::new();

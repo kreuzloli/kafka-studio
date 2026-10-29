@@ -1,4 +1,4 @@
-use crate::models::ConnectionFolderId;
+use crate::models::{ConnectionFolderId, ScramCredentials};
 
 /// 本地连接配置；保存名称和地址不代表已经建立网络连接。
 #[derive(Debug)]
@@ -7,6 +7,8 @@ pub(crate) struct Connection {
     pub(crate) bootstrap_servers: String,
     /// 所属目录；None 表示连接直接位于根层级。
     pub(crate) folder_id: Option<ConnectionFolderId>,
+    /// 当前会话使用的凭据；不得作为普通连接配置明文持久化。
+    pub(crate) credentials: Option<ScramCredentials>,
 }
 
 impl Connection {

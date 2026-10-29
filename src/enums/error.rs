@@ -16,6 +16,10 @@ pub(crate) enum ImportError {
     InvalidStructure,
     /// 同一份导入文件中存在重复目录 ID。
     DuplicateFolderId(String),
+    /// 认证属性只提供了一部分，无法完成校验。
+    IncompleteAuthentication,
+    /// 认证组合或 JAAS 配置无效。
+    Authentication(AuthenticationError),
 }
 
 impl From<quick_xml::Error> for ImportError {
@@ -24,6 +28,14 @@ impl From<quick_xml::Error> for ImportError {
         Self::Xml(err)
     }
 }
+
+impl fmt::Display for ImportError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl Error for ImportError {}
 
 /// 第 7 讲的错误类型骨架；后续按解析失败类别补充，不携带凭据原文。
 #[derive(Debug, PartialEq, Eq)]
@@ -65,3 +77,21 @@ impl fmt::Display for JaasError {
 }
 
 impl Error for JaasError {}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum AuthenticationError {
+    /// 安全协议不在当前支持范围内。
+    UnsupportedSecurityProtocol,
+    /// SASL 机制不在当前支持范围内。
+    UnsupportedSaslMechanism,
+    /// JAAS 文本不符合当前支持的语法或模块要求。
+    Jaas(JaasError),
+}
+
+impl fmt::Display for AuthenticationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl Error for AuthenticationError {}

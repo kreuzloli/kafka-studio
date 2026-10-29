@@ -10,9 +10,10 @@ use uuid::Uuid;
 
 use crate::{
     enums::ImportError,
+    imports::authentication,
     models::{
         Connection, ConnectionFolder, ConnectionFolderId, ConnectionImport, ImportedConnection,
-        ImportedFolder,
+        ImportedFolder, ScramCredentials,
     },
 };
 
@@ -36,12 +37,23 @@ pub(crate) fn parse_connection(
     let mut conn = ImportedConnection::new();
     let mut name = None::<String>;
     let mut bootstrap_servers = None::<String>;
-
+    let mut security_protocol = None::<String>;
+    let mut sasl_mechanism = None::<String>;
+    let mut jaas_config = None::<String>;
     for attr in element.attributes() {
         let attr = attr.map_err(quick_xml::Error::from)?;
         let key = attr.key.as_ref();
         // 只解码本阶段使用的属性，忽略无关字段的值。
-        if !matches!(key, "name" | "bootstrap_servers" | "groupId" | "group") {
+        if !matches!(
+            key,
+            "name"
+                | "bootstrap_servers"
+                | "groupId"
+                | "group"
+                | "broker_security_type"
+                | "sasl_mechanism"
+                | "jaas_config"
+        ) {
             continue;
         }
         let value = attr.normalized_value(version)?.into_owned();
@@ -50,11 +62,23 @@ pub(crate) fn parse_connection(
             "bootstrap_servers" => bootstrap_servers = Some(value),
             "groupId" => conn.folder_external_id = Some(value),
             "group" => conn.folder_name_hint = Some(value),
+            "broker_security_type" => security_protocol = Some(value),
+            "sasl_mechanism" => sasl_mechanism = Some(value),
+            "jaas_config" => jaas_config = Some(value),
             _ => {}
         }
     }
     conn.name = required_attribute(name, "name")?;
     conn.bootstrap_servers = required_attribute(bootstrap_servers, "bootstrap_servers")?;
+    match (security_protocol, sasl_mechanism, jaas_config) {
+        (None, None, None) => {}
+        (Some(protocol), Some(mechanism), Some(jaas)) => {
+            let credentials = authentication::parse_authentication(&protocol, &mechanism, &jaas)
+                .map_err(ImportError::Authentication)?;
+            conn.credentials = Some(credentials);
+        }
+        _ => return Err(ImportError::IncompleteAuthentication),
+    }
     Ok(conn)
 }
 
@@ -236,6 +260,7 @@ fn convert_import(imported: ConnectionImport) -> (Vec<ConnectionFolder>, Vec<Con
             name: conn.name,
             bootstrap_servers: conn.bootstrap_servers,
             folder_id,
+            credentials: conn.credentials,
         });
     }
 
@@ -260,6 +285,83 @@ mod tests {
 
     use super::parse_connection;
     use quick_xml::{XmlVersion, events::Event, reader::Reader};
+
+    #[test]
+    fn imports_optional_authentication() -> Result<(), ImportError> {
+        let basic = parse_import(
+            r#"<connections><connection name="Demo" bootstrap_servers="localhost:9093" /></connections>"#,
+        )?;
+        assert!(basic.connections[0].credentials.is_none());
+
+        let imported = parse_import(
+            r#"<connections><connection name="Demo" bootstrap_servers="localhost:9093"
+                broker_security_type="SASL_SSL" sasl_mechanism="SCRAM-SHA-512"
+                jaas_config="org.apache.kafka.common.security.scram.ScramLoginModule required username=&quot;demo&quot; password=&quot;a&amp;b&amp;amp;c&quot;;" />
+            </connections>"#,
+        )?;
+        let credentials = imported.connections[0]
+            .credentials
+            .as_ref()
+            .expect("Expected imported credentials");
+        assert_eq!(credentials.username, "demo");
+        // 正式导入入口也必须只解码一次 XML 实体。
+        assert_eq!(credentials.password.expose(), "a&b&amp;c");
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_each_missing_authentication_attribute() {
+        let attributes = [
+            r#"broker_security_type="SASL_SSL""#,
+            r#"sasl_mechanism="SCRAM-SHA-512""#,
+            r#"jaas_config="org.apache.kafka.common.security.scram.ScramLoginModule required username='demo' password='p';""#,
+        ];
+        for missing in 0..attributes.len() {
+            let remaining = attributes
+                .iter()
+                .enumerate()
+                .filter_map(|(index, attribute)| (index != missing).then_some(*attribute))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let xml = format!(
+                r#"<connections><connection name="Demo" bootstrap_servers="localhost:9093" {remaining} /></connections>"#
+            );
+            assert!(matches!(
+                parse_import(&xml),
+                Err(ImportError::IncompleteAuthentication)
+            ));
+        }
+    }
+
+    #[test]
+    fn preserves_import_authentication_errors() {
+        use crate::enums::{AuthenticationError, JaasError};
+
+        let cases = [
+            (
+                "SSL",
+                "username='demo' password='p';",
+                AuthenticationError::UnsupportedSecurityProtocol,
+            ),
+            (
+                "SASL_SSL",
+                "username='demo';",
+                AuthenticationError::Jaas(JaasError::MissingPassword),
+            ),
+        ];
+        for (protocol, options, expected) in cases {
+            let xml = format!(
+                r#"<connections><connection name="Demo" bootstrap_servers="localhost:9093"
+                    broker_security_type="{protocol}" sasl_mechanism="SCRAM-SHA-512"
+                    jaas_config="org.apache.kafka.common.security.scram.ScramLoginModule required {options}" />
+                </connections>"#
+            );
+            match parse_import(&xml) {
+                Err(ImportError::Authentication(actual)) => assert_eq!(actual, expected),
+                _ => panic!("Expected an authentication error from XML import"),
+            }
+        }
+    }
 
     #[test]
     fn reads_basic_xml_events() -> Result<(), quick_xml::Error> {
@@ -674,6 +776,39 @@ mod tests {
             );
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn converts_credentials_without_exposing_them_in_debug() -> Result<(), ImportError> {
+        let xml = r#"
+        <connections>
+            <connection
+                name="Demo"
+                bootstrap_servers="localhost:9093"
+                broker_security_type="SASL_SSL"
+                sasl_mechanism="SCRAM-SHA-512"
+                jaas_config="org.apache.kafka.common.security.scram.ScramLoginModule required username='DEMO_USER_ONLY' password='DEMO_PASSWORD_ONLY';" />
+        </connections>
+        "#;
+        let imported = parse_import(xml)?;
+        let (_, connections) = convert_import(imported);
+
+        assert_eq!(connections.len(), 1);
+        let connection = &connections[0];
+        let credentials = connection
+            .credentials
+            .as_ref()
+            .expect("Expected credentials after conversion");
+
+        assert_eq!(credentials.username, "DEMO_USER_ONLY");
+        assert_eq!(credentials.password.expose(), "DEMO_PASSWORD_ONLY");
+
+        for output in [format!("{connection:?}"), format!("{connection:#?}")] {
+            assert!(!output.contains("DEMO_USER_ONLY"));
+            assert!(!output.contains("DEMO_PASSWORD_ONLY"));
+            assert!(output.contains("[REDACTED]"));
+        }
         Ok(())
     }
 }

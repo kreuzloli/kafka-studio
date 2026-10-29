@@ -8,3 +8,5 @@ mod connection_import;
 pub(crate) use connection_import::{ConnectionImport, ImportedConnection, ImportedFolder};
 mod scram_credentials;
 pub(crate) use scram_credentials::ScramCredentials;
+mod secret_string;
+pub(crate) use secret_string::SecretString;

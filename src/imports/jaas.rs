@@ -109,7 +109,7 @@ fn read_option(
     Ok((field, value))
 }
 
-fn parse_scram_jaas(input: &str) -> Result<ScramCredentials, JaasError> {
+pub(super) fn parse_scram_jaas(input: &str) -> Result<ScramCredentials, JaasError> {
     let mut username = None::<String>;
     let mut password = None::<String>;
     let mut chars = input.chars().peekable();
@@ -339,7 +339,7 @@ mod tests {
             let credentials = parse_scram_jaas(&input)?;
 
             assert_eq!(credentials.username, "demo");
-            assert_eq!(credentials.password, expected_password);
+            assert_eq!(credentials.password.expose(), expected_password);
         }
 
         Ok(())
@@ -407,7 +407,7 @@ mod tests {
         }
         let credentials = res.expect("Expected jaas_config credentials");
         assert_eq!(credentials.username, "demo");
-        assert_eq!(credentials.password, "a&b&amp;c");
+        assert_eq!(credentials.password.expose(), "a&b&amp;c");
         Ok(())
     }
 }

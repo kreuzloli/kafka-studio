@@ -2,6 +2,7 @@
 
 mod common;
 mod components;
+mod credentials;
 mod enums;
 mod imports;
 mod models;

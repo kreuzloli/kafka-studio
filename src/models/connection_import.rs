@@ -1,3 +1,5 @@
+use crate::models::ScramCredentials;
+
 /// XML 中的目录记录；ID 只在本次导入文件内有意义。
 pub(crate) struct ImportedFolder {
     pub(crate) external_id: String,
@@ -22,6 +24,8 @@ pub(crate) struct ImportedConnection {
     pub(crate) folder_external_id: Option<String>,
     /// XML 的 group 属性，用于检查名称提示与目录引用是否一致。
     pub(crate) folder_name_hint: Option<String>,
+    /// 已通过当前认证规则校验的凭据；None 表示未提供认证配置。
+    pub(crate) credentials: Option<ScramCredentials>,
 }
 
 impl ImportedConnection {
@@ -31,6 +35,7 @@ impl ImportedConnection {
             bootstrap_servers: String::new(),
             folder_external_id: None,
             folder_name_hint: None,
+            credentials: None,
         }
     }
 }
