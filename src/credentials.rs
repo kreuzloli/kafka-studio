@@ -51,7 +51,9 @@ pub(crate) fn delete_password(connection_id: &str) -> Result<(), keyring::Error>
             Ok(())
         }
         Err(e) => {
-            eprintln!("[kafka-studio] event=credential_delete_failed connection_id={connection_id}");
+            eprintln!(
+                "[kafka-studio] event=credential_delete_failed connection_id={connection_id}"
+            );
             Err(e)
         }
     }

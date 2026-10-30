@@ -27,6 +27,8 @@ pub(crate) struct ImportedConnection {
     pub(crate) folder_name_hint: Option<String>,
     /// 已通过当前认证规则校验的凭据；None 表示未提供认证配置。
     pub(crate) credentials: Option<ScramCredentials>,
+    /// XML 中的原始信任库路径；导入后仍需确认或映射到本机资源。
+    pub(crate) truststore_location: Option<String>,
 }
 
 impl ImportedConnection {
@@ -38,6 +40,7 @@ impl ImportedConnection {
             folder_external_id: None,
             folder_name_hint: None,
             credentials: None,
+            truststore_location: None,
         }
     }
 }

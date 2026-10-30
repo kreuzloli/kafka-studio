@@ -53,6 +53,7 @@ pub(crate) fn parse_connection(
                 | "broker_security_type"
                 | "sasl_mechanism"
                 | "jaas_config"
+                | "truststore_location"
         ) {
             continue;
         }
@@ -66,6 +67,7 @@ pub(crate) fn parse_connection(
             "broker_security_type" => security_protocol = Some(value),
             "sasl_mechanism" => sasl_mechanism = Some(value),
             "jaas_config" => jaas_config = Some(value),
+            "truststore_location" => conn.truststore_location = Some(value),
             _ => {}
         }
     }
@@ -811,6 +813,22 @@ mod tests {
             assert!(!output.contains("DEMO_PASSWORD_ONLY"));
             assert!(output.contains("[REDACTED]"));
         }
+        Ok(())
+    }
+
+    #[test]
+    fn imports_truststore_location() -> Result<(), ImportError> {
+        let xml = r#"
+        <connections>
+            <connection
+                name="Demo"
+                bootstrap_servers="localhost:9093"
+                truststore_location="D:\demo\client_truststore.jks" />
+        </connections>
+        "#;
+        let import = parse_import(xml)?;
+        let tl = import.connections[0].truststore_location.as_deref();
+        assert_eq!(tl, Some(r"D:\demo\client_truststore.jks"));
         Ok(())
     }
 }
