@@ -59,12 +59,14 @@ impl KafkaStudio {
             focus_handle,
             connections: vec![
                 Connection {
+                    id: uuid::Uuid::new_v4().to_string(),
                     name: String::from("Local Demo"),
                     bootstrap_servers: String::from("localhost:9092"),
                     folder_id: Some(development_id.clone()),
                     credentials: None,
                 },
                 Connection {
+                    id: uuid::Uuid::new_v4().to_string(),
                     name: String::from("Test Demo"),
                     bootstrap_servers: String::from("test.example:9092"),
                     folder_id: None,
@@ -237,6 +239,7 @@ impl KafkaStudio {
             name = format!("New connection {number}");
         }
         self.connections.push(Connection {
+            id: uuid::Uuid::new_v4().to_string(),
             name,
             bootstrap_servers: String::from("localhost:9092"),
             folder_id: None,

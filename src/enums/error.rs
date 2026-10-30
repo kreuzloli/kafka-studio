@@ -37,7 +37,7 @@ impl fmt::Display for ImportError {
 
 impl Error for ImportError {}
 
-/// 第 7 讲的错误类型骨架；后续按解析失败类别补充，不携带凭据原文。
+/// JAAS 语法与支持范围错误；仅携带类别，不携带凭据原文。
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum JaasError {
     /// 应该遇到开引号，但没有	demo，或者空输入

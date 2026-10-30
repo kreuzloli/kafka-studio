@@ -7,6 +7,7 @@ pub(crate) struct ScramCredentials {
 }
 
 impl ScramCredentials {
+    /// 保留用户名和密码的原始空白与大小写，不对凭据做归一化。
     pub(crate) fn new(username: String, password: String) -> Self {
         ScramCredentials {
             username,
@@ -16,6 +17,7 @@ impl ScramCredentials {
 }
 
 impl std::fmt::Debug for ScramCredentials {
+    /// 整体隐藏凭据，避免派生 Debug 暴露用户名。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "ScramCredentials([REDACTED])")
     }

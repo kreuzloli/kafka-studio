@@ -5,7 +5,7 @@ use crate::{enums::JaasError, models::ScramCredentials};
 pub(super) const MODULE_NAME: &str = "org.apache.kafka.common.security.scram.ScramLoginModule";
 pub(super) const MODULE_FLAG: &str = "required";
 
-/// 后续约定：从开引号开始消费字符，停在闭引号之后；错误不包含输入片段。
+/// 从开引号开始消费字符，停在闭引号之后；错误不包含输入片段。
 fn read_quoted_value(
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
 ) -> Result<String, JaasError> {
@@ -74,13 +74,13 @@ fn read_word(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Result<Str
 fn parse_scram_header(
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
 ) -> Result<(String, String), JaasError> {
-    // 读取模块
+    // 只接受约定的模块名称，不加载或执行 Java 类。
     skip_whitespace(chars);
     let module = read_word(chars)?;
     if module != MODULE_NAME {
         return Err(JaasError::UnsupportedModule);
     }
-    // 读取标记
+    // 当前仅支持单个 required 模块，不解释 JAAS 模块组合。
     skip_whitespace(chars);
     let flag = read_word(chars)?;
     if flag != MODULE_FLAG {
@@ -109,12 +109,14 @@ fn read_option(
     Ok((field, value))
 }
 
+/// 从已完成 XML 解码的文本提取 SCRAM 凭据；不再次解码，也不输出原文。
 pub(super) fn parse_scram_jaas(input: &str) -> Result<ScramCredentials, JaasError> {
     let mut username = None::<String>;
     let mut password = None::<String>;
     let mut chars = input.chars().peekable();
     parse_scram_header(&mut chars)?;
     loop {
+        // 先记录分隔符，再跳过空白，避免接受两个紧邻的键值项。
         let has_whitespace = chars.peek().is_some_and(|c| c.is_whitespace());
         skip_whitespace(&mut chars);
         match chars.peek().copied() {

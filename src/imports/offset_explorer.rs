@@ -56,6 +56,7 @@ pub(crate) fn parse_connection(
         ) {
             continue;
         }
+        // XML 实体只在此处解码一次，后续 JAAS 解析保留密码的字面含义。
         let value = attr.normalized_value(version)?.into_owned();
         match key {
             "name" => name = Some(value),
@@ -112,7 +113,7 @@ fn parse_folder(
 
 /// 离线收集连接与目录，校验根节点、已知节点层级及目录 ID 唯一性。
 ///
-/// 未知子树整体忽略；连接的目录引用留到转换时处理，不读取认证或证书资源。
+/// 未知子树整体忽略；连接的目录引用留到转换时处理，解析会话凭据，但不访问钥匙串、证书文件或网络。
 fn parse_import(xml: &str) -> Result<ConnectionImport, ImportError> {
     let mut reader = Reader::from_str(xml);
     let mut version = XmlVersion::Implicit1_0;
@@ -257,6 +258,7 @@ fn convert_import(imported: ConnectionImport) -> (Vec<ConnectionFolder>, Vec<Con
             );
         }
         connections.push(Connection {
+            id: uuid::Uuid::new_v4().to_string(),
             name: conn.name,
             bootstrap_servers: conn.bootstrap_servers,
             folder_id,

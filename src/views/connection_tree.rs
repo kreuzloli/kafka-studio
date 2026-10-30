@@ -34,6 +34,7 @@ fn append_rows(
             folder_index,
             depth,
         });
+        // 折叠仅跳过子行，目录本身仍显示，原始连接索引也保持不变。
         if !collapsed_folders.contains(&folder.id) {
             append_rows(
                 Some(&folder.id),
@@ -91,18 +92,21 @@ mod tests {
 
         let connections = vec![
             Connection {
+                id: uuid::Uuid::new_v4().to_string(),
                 name: "Root connection".to_owned(),
                 bootstrap_servers: "localhost:9092".to_owned(),
                 folder_id: None,
                 credentials: None,
             },
             Connection {
+                id: uuid::Uuid::new_v4().to_string(),
                 name: "Nested connection".to_owned(),
                 bootstrap_servers: "localhost:9093".to_owned(),
                 folder_id: Some(local_id),
                 credentials: None,
             },
             Connection {
+                id: uuid::Uuid::new_v4().to_string(),
                 name: "Development connection".to_owned(),
                 bootstrap_servers: "localhost:9094".to_owned(),
                 folder_id: Some(development_id),

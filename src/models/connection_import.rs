@@ -8,6 +8,7 @@ pub(crate) struct ImportedFolder {
 }
 
 impl ImportedFolder {
+    /// 创建待解析的目录记录；必填字段由解析器填充并校验。
     pub(crate) fn new() -> Self {
         Self {
             external_id: String::new(),
@@ -29,6 +30,7 @@ pub(crate) struct ImportedConnection {
 }
 
 impl ImportedConnection {
+    /// 创建待解析的连接记录；缺省凭据不代表已经通过认证。
     pub(crate) fn new() -> Self {
         Self {
             name: String::new(),
@@ -47,6 +49,7 @@ pub(crate) struct ConnectionImport {
 }
 
 impl ConnectionImport {
+    /// 创建一份独立的导入结果，收集连接及目录后再统一转换。
     pub(crate) fn new() -> Self {
         Self {
             folders: Vec::<ImportedFolder>::new(),

@@ -3,6 +3,8 @@ use crate::models::{ConnectionFolderId, ScramCredentials};
 /// 本地连接配置；保存名称和地址不代表已经建立网络连接。
 #[derive(Debug)]
 pub(crate) struct Connection {
+    /// 连接的稳定标识，用于关联系统中保存的密码。
+    pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) bootstrap_servers: String,
     /// 所属目录；None 表示连接直接位于根层级。
@@ -48,10 +50,17 @@ impl Connection {
         }
         Ok(servers.join(","))
     }
+
+    /// 清除当前连接持有的会话凭据，保留连接配置和系统中已保存的密码。
+    pub(crate) fn clear_credentials(&mut self) {
+        self.credentials = None::<ScramCredentials>;
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::models::{ConnectionFolderId, ScramCredentials, SecretString};
+
     use super::Connection;
 
     #[test]
@@ -83,5 +92,30 @@ mod tests {
                 Err("Port must be a number from 1 to 65535")
             );
         }
+    }
+
+    #[test]
+    fn clears_credentials_without_changing_connection() {
+        // 构造带有 Some(ScramCredentials) 的可变连接。
+        let mut conn = Connection {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: "test-conn".to_string(),
+            bootstrap_servers: "test-server".to_string(),
+            folder_id: Some(ConnectionFolderId("folder-1".to_string())),
+            credentials: Some(ScramCredentials {
+                username: "root".to_string(),
+                password: SecretString::new("123456".to_string()),
+            }),
+        };
+        // 调用 clear_credentials。
+        conn.clear_credentials();
+        // 验证凭据为空，名称、地址和目录归属保持原值。
+        assert!(conn.credentials.is_none());
+        assert_eq!(conn.name, "test-conn");
+        assert_eq!(conn.bootstrap_servers, "test-server");
+        assert_eq!(
+            conn.folder_id,
+            Some(ConnectionFolderId("folder-1".to_string()))
+        );
     }
 }
