@@ -3,3 +3,4 @@
 mod authentication;
 mod jaas;
 mod offset_explorer;
+pub(crate) use offset_explorer::prepare_import;

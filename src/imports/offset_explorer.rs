@@ -265,6 +265,8 @@ fn convert_import(imported: ConnectionImport) -> (Vec<ConnectionFolder>, Vec<Con
             bootstrap_servers: conn.bootstrap_servers,
             folder_id,
             credentials: conn.credentials,
+            truststore_location: conn.truststore_location,
+            ca_location: None,
         });
     }
 
@@ -274,6 +276,14 @@ fn convert_import(imported: ConnectionImport) -> (Vec<ConnectionFolder>, Vec<Con
         folders.len()
     );
     (folders, connections)
+}
+
+/// 将 XML 转换为待确认的连接与目录；不修改当前列表，也不访问外部资源。
+pub(crate) fn prepare_import(
+    xml: &str,
+) -> Result<(Vec<ConnectionFolder>, Vec<Connection>), ImportError> {
+    let imported = parse_import(xml)?;
+    Ok(convert_import(imported))
 }
 
 #[cfg(test)]
@@ -826,9 +836,14 @@ mod tests {
                 truststore_location="D:\demo\client_truststore.jks" />
         </connections>
         "#;
-        let import = parse_import(xml)?;
-        let tl = import.connections[0].truststore_location.as_deref();
-        assert_eq!(tl, Some(r"D:\demo\client_truststore.jks"));
+        let imported = parse_import(xml)?;
+        let (_, conn) = convert_import(imported);
+        let truststore_location = conn[0].truststore_location.as_deref();
+        assert_eq!(truststore_location, Some(r"D:\demo\client_truststore.jks"));
+        assert!(
+            conn[0].ca_location.is_none(),
+            "Importing a truststore path must not select a local CA file"
+        );
         Ok(())
     }
 }

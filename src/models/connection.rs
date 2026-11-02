@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use crate::models::{ConnectionFolderId, ScramCredentials};
 
 /// 本地连接配置；保存名称和地址不代表已经建立网络连接。
@@ -11,6 +13,10 @@ pub(crate) struct Connection {
     pub(crate) folder_id: Option<ConnectionFolderId>,
     /// 当前会话使用的凭据；不得作为普通连接配置明文持久化。
     pub(crate) credentials: Option<ScramCredentials>,
+    /// 导入时保留的信任库来源路径，不代表本机可直接使用。
+    pub(crate) truststore_location: Option<String>,
+    /// 用户选择的本机 PEM CA 路径；设置路径不代表已验证证书或连接。
+    pub(crate) ca_location: Option<PathBuf>,
 }
 
 impl Connection {
@@ -59,6 +65,7 @@ impl Connection {
 
 #[cfg(test)]
 mod tests {
+
     use crate::models::{ConnectionFolderId, ScramCredentials, SecretString};
 
     use super::Connection;
@@ -106,6 +113,8 @@ mod tests {
                 username: "root".to_string(),
                 password: SecretString::new("123456".to_string()),
             }),
+            truststore_location: None,
+            ca_location: None,
         };
         // 调用 clear_credentials。
         conn.clear_credentials();

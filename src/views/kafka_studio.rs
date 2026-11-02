@@ -1,10 +1,10 @@
 //! 只读客户端的 Demo 外壳：连接选择、目录折叠与键盘导航。
 
-use std::collections::HashSet;
+use std::{collections::HashSet, fs};
 
 use gpui::{
-    App, Div, Entity, FocusHandle, KeyDownEvent, ScrollHandle, Window, div, prelude::*, px, rgb,
-    rgba,
+    App, Div, Entity, FocusHandle, KeyDownEvent, PathPromptOptions, ScrollHandle, Window, div,
+    prelude::*, px, rgb, rgba,
 };
 use gpui_component::input::{InputState, TextInput};
 
@@ -38,6 +38,8 @@ pub struct KafkaStudio {
     folders: Vec<ConnectionFolder>,
     /// 已折叠的目录；折叠只影响可见行，不清除选择和编辑草稿。
     collapsed_folders: HashSet<ConnectionFolderId>,
+    /// 文件选择或读取进行中，避免重复启动任务。
+    ca_selection_pending: bool,
 }
 
 impl KafkaStudio {
@@ -64,6 +66,8 @@ impl KafkaStudio {
                     bootstrap_servers: String::from("localhost:9092"),
                     folder_id: Some(development_id.clone()),
                     credentials: None,
+                    truststore_location: None,
+                    ca_location: None,
                 },
                 Connection {
                     id: uuid::Uuid::new_v4().to_string(),
@@ -71,6 +75,8 @@ impl KafkaStudio {
                     bootstrap_servers: String::from("test.example:9092"),
                     folder_id: None,
                     credentials: None,
+                    truststore_location: None,
+                    ca_location: None,
                 },
             ],
             name_input,
@@ -83,6 +89,7 @@ impl KafkaStudio {
                 parent_id: None,
             }],
             collapsed_folders: HashSet::<ConnectionFolderId>::new(),
+            ca_selection_pending: false,
         }
     }
 
@@ -244,6 +251,8 @@ impl KafkaStudio {
             bootstrap_servers: String::from("localhost:9092"),
             folder_id: None,
             credentials: None,
+            truststore_location: None,
+            ca_location: None,
         });
 
         self.expanded = true;
@@ -260,6 +269,72 @@ impl KafkaStudio {
         self.select_connection(None, window, cx);
         eprintln!("[kafka-studio] event=connection_deleted index={index}");
     }
+    /// 选择本机 CA 文件，在后台检查可读性，再更新发起操作的连接。
+    fn select_ca_file(&mut self, cx: &mut Context<Self>) {
+        if self.ca_selection_pending {
+            return;
+        }
+        let Some(index) = self.selected_connection else {
+            self.form_error = Some("Select a connection first");
+            cx.notify();
+            return;
+        };
+        // 等待期间用户可能切换或删除连接，因此记录稳定 ID，不保留列表索引。
+        let connection_id = self.connections[index].id.clone();
+        self.ca_selection_pending = true;
+        self.form_error = None;
+        cx.notify();
+        let selection = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Select PEM CA file".into()),
+        });
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            let res = match selection.await {
+                Ok(Ok(Some(paths))) => {
+                    if let Some(path) = paths.into_iter().next() {
+                        executor.spawn(async move {
+                            // 只检查可读性，不解析 PEM，也不验证 TLS。
+                            fs::read(&path).map(|_|Some(path)).map_err(|_| "Cannot read CA file")
+                        }).await
+                    } else {
+                        Ok(None)
+                    }
+                }
+                Ok(Ok(None)) => Ok(None),
+                _=> Err("Cannot open file picker")
+            };
+            // 视图可能已关闭，此时无需再更新界面。
+            let _ = this.update(cx, |this, cx| {
+                this.ca_selection_pending = false;
+                if let Some(conn) = this.connections.iter_mut().find(|conn| conn.id == connection_id) {
+                    match res {
+                        Ok(Some(path)) => {
+                            conn.ca_location = Some(path);
+                            eprintln!(
+                                "[kafka-studio] event=ca_file_selected connection_id={connection_id}"
+                            );
+                        },
+                        Ok(None) => {},
+                        Err(msg) => {
+                            eprintln!(
+                                "[kafka-studio] event=ca_selection_failed connection_id={connection_id}"
+                            );
+                            // 错误只显示在发起操作的连接上。
+                            if this.selected_connection.is_some_and(|index| {
+                                this.connections[index].id == connection_id
+                            }) {
+                                this.form_error = Some(msg);
+                            }
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        }).detach();
+    }
 }
 
 impl Render for KafkaStudio {
@@ -268,6 +343,51 @@ impl Render for KafkaStudio {
         let selected_connection = self
             .selected_connection
             .map(|index| &self.connections[index]);
+        // 将按钮行单独构建，避免事件回调淹没主布局的容器层级。
+        let connection_actions = div()
+            .flex()
+            .flex_row()
+            .gap_1()
+            .p_2()
+            .child(
+                div()
+                    .id("reset-fields")
+                    .p_2()
+                    .cursor_pointer()
+                    .child("Reset fields")
+                    .on_click(cx.listener(|this, _event, window, cx| {
+                        let selected = this.selected_connection;
+                        this.select_connection(selected, window, cx);
+                        eprintln!(
+                            "[kafka-studio] event=connection_draft_reset selected={selected:?}"
+                        );
+                    })),
+            )
+            .child(
+                div()
+                    .id("save-connection")
+                    .p_2()
+                    .cursor_pointer()
+                    .child("Save connection")
+                    .on_click(cx.listener(|this, _event, window, cx| {
+                        this.save_connection(window, cx);
+                    })),
+            )
+            .child(
+                div()
+                    .id("select-ca-file")
+                    .p_2()
+                    .cursor_pointer()
+                    .child(if self.ca_selection_pending {
+                        "Selecting CA..."
+                    } else {
+                        "Select CA file"
+                    })
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.select_ca_file(cx);
+                    })),
+            );
+
         div()
             .track_focus(&self.focus_handle)
             // 传入方法而非调用方法，由 listener 在事件到来时取得可变实体。
@@ -293,7 +413,15 @@ impl Render for KafkaStudio {
                             .flex_shrink_0()
                             .border_r_1()
                             .border_color(rgb(0x475569))
-                            .child(connection_list(cx, self.selected_connection, self.expanded, &self.connections, &self.sidebar_scroll, &self.folders, &self.collapsed_folders))
+                            .child(connection_list(
+                                cx,
+                                self.selected_connection,
+                                self.expanded,
+                                &self.connections,
+                                &self.sidebar_scroll,
+                                &self.folders,
+                                &self.collapsed_folders,
+                            )),
                     )
                     .child(
                         div()
@@ -301,7 +429,12 @@ impl Render for KafkaStudio {
                             .flex_col()
                             .flex_1()
                             .min_w_0()
-                            .child(connection_workspace(selected_connection, &self.folders, window, cx))
+                            .child(connection_workspace(
+                                selected_connection,
+                                &self.folders,
+                                window,
+                                cx,
+                            ))
                             .child(
                                 div()
                                     .flex()
@@ -314,17 +447,14 @@ impl Render for KafkaStudio {
                                             .items_center()
                                             .gap_1()
                                             .p_2()
-                                            .child(
-                                                div()
-                                                    .w(px(180.0))
-                                                    .flex_shrink_0()
-                                                    .child(selectable_text(
-                                                        "name-label",
-                                                        "Connection name:",
-                                                        window,
-                                                        cx,
-                                                    )),
-                                            )
+                                            .child(div().w(px(180.0)).flex_shrink_0().child(
+                                                selectable_text(
+                                                    "name-label",
+                                                    "Connection name:",
+                                                    window,
+                                                    cx,
+                                                ),
+                                            ))
                                             .child(TextInput::new(&self.name_input)),
                                     )
                                     .child(
@@ -333,40 +463,24 @@ impl Render for KafkaStudio {
                                             .items_center()
                                             .gap_1()
                                             .p_2()
-                                            .child(
-                                                div()
-                                                    .w(px(180.0))
-                                                    .flex_shrink_0()
-                                                    .child(selectable_text(
-                                                        "bootstrap-label",
-                                                        "Bootstrap servers:",
-                                                        window,
-                                                        cx,
-                                                    )),
-                                            )
+                                            .child(div().w(px(180.0)).flex_shrink_0().child(
+                                                selectable_text(
+                                                    "bootstrap-label",
+                                                    "Bootstrap servers:",
+                                                    window,
+                                                    cx,
+                                                ),
+                                            ))
                                             .child(TextInput::new(&self.bootstrap_input)),
                                     )
-                                    .child(div().flex().flex_row().gap_1().p_2()
-                                    .child(div().id("reset-fields").p_2().cursor_pointer().child("Reset fields").on_click(cx.listener(|this, _event, window, cx|{
-                                        let selected = this.selected_connection;
-                                        this.select_connection(selected, window, cx);
-                                        eprintln!(
-                                            "[kafka-studio] event=connection_draft_reset selected={selected:?}"
-                                        );
-                                    })))
-                                    .child(
-                                        div()
-                                            .id("save-connection")
-                                            .p_2()
-                                            .cursor_pointer()
-                                            .child("Save connection")
-                                            .on_click(cx.listener(|this, _event, window, cx| {
-                                                this.save_connection(window, cx);
-                                            })),
-                                    )
-                                    )
+                                    .child(connection_actions)
                                     .when_some(self.form_error, |this, message| {
-                                        this.child(selectable_text("form-error", message, window, cx))
+                                        this.child(selectable_text(
+                                            "form-error",
+                                            message,
+                                            window,
+                                            cx,
+                                        ))
                                     }),
                             ),
                     ),
@@ -568,6 +682,14 @@ pub(super) fn connection_workspace(
                     .map(|f| f.name.as_str())
                     .unwrap_or("Unknown folder"),
             };
+            let ca_description = match conection.ca_location.as_deref() {
+                Some(path) => format!("CA file: {} (TLS not verified)", path.display()),
+                None => String::from("CA file: not selected"),
+            };
+            let truststore_description = match conection.truststore_location.as_deref() {
+                Some(path) => format!("Imported truststore: {path}"),
+                None => String::from("Imported truststore: not provided"),
+            };
             div()
                 .flex()
                 .flex_col()
@@ -590,6 +712,13 @@ pub(super) fn connection_workspace(
                     window,
                     cx,
                 ))
+                .child(selectable_text(
+                    "workspace-truststore",
+                    truststore_description,
+                    window,
+                    cx,
+                ))
+                .child(selectable_text("workspace-ca", ca_description, window, cx))
                 .child(selectable_text(
                     "workspace-status",
                     "Status: not connected",

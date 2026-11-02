@@ -103,6 +103,8 @@ mod tests {
                 username: username.clone(),
                 password: SecretString::new(String::from("123456")),
             }),
+            truststore_location: None,
+            ca_location: None,
         };
         remember_password(&conn)?;
         conn.clear_credentials();
