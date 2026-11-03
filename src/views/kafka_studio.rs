@@ -11,7 +11,8 @@ use gpui_component::input::{InputState, TextInput};
 use crate::{
     components::selectable_text,
     enums::ConnectionTreeRow,
-    models::{Connection, ConnectionFolder, ConnectionFolderId},
+    imports,
+    models::{Connection, ConnectionFolder, ConnectionFolderId, ImportPreview},
     views::connection_tree,
 };
 
@@ -40,6 +41,12 @@ pub struct KafkaStudio {
     collapsed_folders: HashSet<ConnectionFolderId>,
     /// 文件选择或读取进行中，避免重复启动任务。
     ca_selection_pending: bool,
+    /// 待用户确认的导入数据，与当前连接列表分开保存。
+    import_preview: Option<ImportPreview>,
+    /// XML 文件选择与解析进行中，避免重复启动导入。
+    import_pending: bool,
+    /// 导入操作的提示，与连接编辑错误分开。
+    import_error: Option<&'static str>,
 }
 
 impl KafkaStudio {
@@ -90,6 +97,9 @@ impl KafkaStudio {
             }],
             collapsed_folders: HashSet::<ConnectionFolderId>::new(),
             ca_selection_pending: false,
+            import_preview: None,
+            import_pending: false,
+            import_error: None,
         }
     }
 
@@ -269,6 +279,7 @@ impl KafkaStudio {
         self.select_connection(None, window, cx);
         eprintln!("[kafka-studio] event=connection_deleted index={index}");
     }
+
     /// 选择本机 CA 文件，在后台检查可读性，再更新发起操作的连接。
     fn select_ca_file(&mut self, cx: &mut Context<Self>) {
         if self.ca_selection_pending {
@@ -335,6 +346,85 @@ impl KafkaStudio {
             });
         }).detach();
     }
+
+    /// 选择 XML 并在后台准备预览；成功前不修改当前连接列表。
+    fn select_import_file(&mut self, cx: &mut Context<Self>) {
+        if self.import_pending {
+            return;
+        }
+        self.import_pending = true;
+        self.import_error = None;
+        cx.notify();
+        let selection = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Select Offset Explorer XML".into()),
+        });
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            let res = match selection.await {
+                Ok(Ok(Some(paths))) => {
+                    if let Some(path) = paths.into_iter().next() {
+                        executor
+                            .spawn(async move {
+                                let xml = fs::read_to_string(&path)
+                                    .map_err(|_| "Cannot read XML file")?;
+                                let preview = imports::prepare_import(&xml)
+                                    .map_err(|_| "Cannot parse connection XML")?;
+                                Ok(Some(preview))
+                            })
+                            .await
+                    } else {
+                        Ok(None)
+                    }
+                }
+                Ok(Ok(None)) => Ok(None),
+                _ => Err("Cannot open file picker"),
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.import_pending = false;
+                match res {
+                    Ok(Some(preview)) => this.import_preview = Some(preview),
+                    Ok(None) => {}
+                    Err(msg) => this.import_error = Some(msg),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 将预览中的目录和连接追加到当前会话，确认后清空预览。
+    fn confirm_import(&mut self, cx: &mut Context<Self>) {
+        if self.import_pending {
+            return;
+        }
+        let Some(preivew) = self.import_preview.take() else {
+            return;
+        };
+        let folder_count = preivew.folders.len();
+        let connection_count = preivew.connections.len();
+        // extend() 消费这两个集合，把元素追加进去。导入转换已经生成新的内部 ID，不需要在这里重新生成。
+        self.folders.extend(preivew.folders);
+        self.connections.extend(preivew.connections);
+        self.expanded = true;
+        self.import_error = None;
+        println!(
+            "[kafka-studio] event=import_confirmed connections={connection_count} folders={folder_count}"
+        );
+        cx.notify();
+    }
+
+    /// 丢弃尚未确认的数据，不修改当前连接列表。
+    fn cancel_import(&mut self, cx: &mut Context<Self>) {
+        if self.import_pending {
+            return;
+        }
+        self.import_preview = None;
+        self.import_error = None;
+        cx.notify();
+    }
 }
 
 impl Render for KafkaStudio {
@@ -385,6 +475,20 @@ impl Render for KafkaStudio {
                     })
                     .on_click(cx.listener(|this, _event, _window, cx| {
                         this.select_ca_file(cx);
+                    })),
+            )
+            .child(
+                div()
+                    .id("select-import-file")
+                    .p_2()
+                    .cursor_pointer()
+                    .child(if self.import_pending {
+                        "Importing..."
+                    } else {
+                        "Import XML"
+                    })
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.select_import_file(cx);
                     })),
             );
 
@@ -474,6 +578,74 @@ impl Render for KafkaStudio {
                                             .child(TextInput::new(&self.bootstrap_input)),
                                     )
                                     .child(connection_actions)
+                                    .when_some(self.import_preview.as_ref(), |this, preview| {
+                                        let connection_rows =
+                                            preview.connections.iter().map(|conn| {
+                                                let truststore = conn
+                                                    .truststore_location
+                                                    .as_deref()
+                                                    .unwrap_or("not provided");
+                                                div()
+                                                    .child(format!(
+                                                        "Connection: {}",
+                                                        conn.name
+                                                    ))
+                                                    .child(format!(
+                                                        "Imported truststore: {truststore}"
+                                                    ))
+                                                    .child("Local CA: not selected")
+                                            });
+                                        this.child(
+                                                div()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap_2()
+                                                    .child(selectable_text(
+                                                        "import-preview-summary",
+                                                        format!(
+                                                            "Import preview: {} connections, {} folders",
+                                                            preview.connections.len(),
+                                                            preview.folders.len(),
+                                                        ),
+                                                        window,
+                                                        cx,
+                                                    ))
+                                                    .children(connection_rows)
+                                                    .child(
+                                                        div()
+                                                            .flex()
+                                                            .gap_2()
+                                                            .child(
+                                                                div()
+                                                                    .id("confirm_import")
+                                                                    .p_2()
+                                                                    .cursor_pointer()
+                                                                    .child("Confirm import")
+                                                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                                                        this.confirm_import(cx);
+                                                                    }))
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .id("cancel-import")
+                                                                    .p_2()
+                                                                    .cursor_pointer()
+                                                                    .child("Cancel")
+                                                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                                                        this.cancel_import(cx);
+                                                                    }))
+                                                            )
+                                                    )
+                                            )
+                                    })
+                                    .when_some(self.import_error, |this, message| {
+                                        this.child(selectable_text(
+                                            "import-error",
+                                            message,
+                                            window,
+                                            cx,
+                                        ))
+                                    })
                                     .when_some(self.form_error, |this, message| {
                                         this.child(selectable_text(
                                             "form-error",

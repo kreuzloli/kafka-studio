@@ -12,8 +12,8 @@ use crate::{
     enums::ImportError,
     imports::authentication,
     models::{
-        Connection, ConnectionFolder, ConnectionFolderId, ConnectionImport, ImportedConnection,
-        ImportedFolder, ScramCredentials,
+        Connection, ConnectionFolder, ConnectionFolderId, ConnectionImport, ImportPreview,
+        ImportedConnection, ImportedFolder,
     },
 };
 
@@ -279,11 +279,13 @@ fn convert_import(imported: ConnectionImport) -> (Vec<ConnectionFolder>, Vec<Con
 }
 
 /// 将 XML 转换为待确认的连接与目录；不修改当前列表，也不访问外部资源。
-pub(crate) fn prepare_import(
-    xml: &str,
-) -> Result<(Vec<ConnectionFolder>, Vec<Connection>), ImportError> {
+pub(crate) fn prepare_import(xml: &str) -> Result<ImportPreview, ImportError> {
     let imported = parse_import(xml)?;
-    Ok(convert_import(imported))
+    let (folders, connections) = convert_import(imported);
+    Ok(ImportPreview {
+        folders,
+        connections,
+    })
 }
 
 #[cfg(test)]
