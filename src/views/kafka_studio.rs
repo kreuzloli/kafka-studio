@@ -3,8 +3,8 @@
 use std::{collections::HashSet, fs};
 
 use gpui::{
-    App, Div, Entity, FocusHandle, KeyDownEvent, PathPromptOptions, ScrollHandle, Window, div,
-    prelude::*, px, rgb, rgba,
+    App, Div, Entity, FocusHandle, KeyDownEvent, PathPromptOptions, PromptLevel, ScrollHandle,
+    Window, div, prelude::*, px, rgb, rgba,
 };
 use gpui_component::input::{InputState, TextInput};
 
@@ -246,7 +246,12 @@ impl KafkaStudio {
     }
 
     /// 添加当前会话的连接配置，生成未被占用的默认名称并选中新行。
-    fn add_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn add_connection(
+        &mut self,
+        folder_id: Option<ConnectionFolderId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let index = self.connections.len();
         let mut number = index + 1;
         let mut name = format!("New connection {number}");
@@ -259,7 +264,7 @@ impl KafkaStudio {
             id: uuid::Uuid::new_v4().to_string(),
             name,
             bootstrap_servers: String::from("localhost:9092"),
-            folder_id: None,
+            folder_id,
             credentials: None,
             truststore_location: None,
             ca_location: None,
@@ -270,14 +275,107 @@ impl KafkaStudio {
         eprintln!("[kafka-studio] event=connection_added index={index}");
     }
 
-    /// 删除选中配置并清空草稿，避免继续使用删除前的索引。
-    fn delete_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(index) = self.selected_connection else {
-            return;
-        };
+    /// 删除指定连接；删除其他行时保留当前选择和编辑草稿。
+    fn delete_connection(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.connections.remove(index);
-        self.select_connection(None, window, cx);
+        match self.selected_connection {
+            Some(selected) => {
+                if selected == index {
+                    self.select_connection(None, window, cx);
+                }
+                if selected > index {
+                    self.selected_connection = Some(selected - 1);
+                }
+            }
+            _ => {}
+        }
         eprintln!("[kafka-studio] event=connection_deleted index={index}");
+        cx.notify();
+    }
+
+    /// 展示删除范围，用户确认后再删除目录及其连接。
+    fn request_delete_folder(
+        &mut self,
+        folder_id: ConnectionFolderId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let folder_ids = connection_tree::collect_folder_subtree_ids(&self.folders, &folder_id);
+        let connection_count = self
+            .connections
+            .iter()
+            .filter(|conn| {
+                conn.folder_id
+                    .as_ref()
+                    .is_some_and(|id| folder_ids.contains(id))
+            })
+            .count();
+        let detail = format!(
+            "This will delete {} folders (including this folder) and {} connections. \
+                 This cannot be undone.",
+            folder_ids.len(),
+            connection_count,
+        );
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            "Delete this folder and its contents?",
+            Some(&detail),
+            &["Cancel", "Delete"],
+            cx,
+        );
+        // detach() 的意思是：放开任务句柄，让任务继续运行，不在这里等待它完成。
+        // spawn_in() 会返回一个 Task 句柄。在 GPUI 中，直接丢弃这个句柄会取消任务；调用 .detach() 则允许任务继续执行。
+        cx.spawn_in(window, async move |this, cx| {
+            if let Ok(1) = answer.await {
+                // 等待期间视图可能关闭；关闭后无需再执行界面操作。
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.delete_folder(&folder_id, window, cx);
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// 删除目录及其后代；保留未被删除连接的选择和编辑草稿。
+    fn delete_folder(
+        &mut self,
+        folder_id: &ConnectionFolderId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let folder_ids = connection_tree::collect_folder_subtree_ids(&self.folders, folder_id);
+        // 批量删除会改变索引，先记录选中连接的稳定 ID。
+        let selected_id = self
+            .selected_connection
+            .map(|index| self.connections[index].id.clone());
+        let previous_connection_count = self.connections.len();
+        let previous_folder_count = self.folders.len();
+        // retain 的含义是“保留满足条件的元素”。
+        self.connections.retain(|conn| {
+            !conn
+                .folder_id
+                .as_ref()
+                .is_some_and(|id| folder_ids.contains(id))
+        });
+        self.folders
+            .retain(|folder| !folder_ids.contains(&folder.id));
+        self.collapsed_folders.retain(|id| !folder_ids.contains(id));
+        if let Some(selected_id) = selected_id {
+            match self
+                .connections
+                .iter()
+                .position(|conn| conn.id == selected_id)
+            {
+                Some(index) => self.selected_connection = Some(index),
+                None => self.select_connection(None, window, cx),
+            }
+        }
+        eprintln!(
+            "[kafka-studio] event=folder_deleted folders={} connections={}",
+            previous_folder_count - self.folders.len(),
+            previous_connection_count - self.connections.len(),
+        );
+        cx.notify();
     }
 
     /// 选择本机 CA 文件，在后台检查可读性，再更新发起操作的连接。
@@ -529,10 +627,14 @@ impl Render for KafkaStudio {
                     )
                     .child(
                         div()
+                            .id("connection-panel-scroll")
                             .flex()
                             .flex_col()
                             .flex_1()
+                            .h_full()
+                            .min_h_0()
                             .min_w_0()
+                            .overflow_y_scroll()
                             .child(connection_workspace(
                                 selected_connection,
                                 &self.folders,
@@ -543,6 +645,7 @@ impl Render for KafkaStudio {
                                 div()
                                     .flex()
                                     .flex_col()
+                                    .flex_shrink_0()
                                     .gap_2()
                                     .p_6()
                                     .child(
@@ -594,6 +697,7 @@ impl Render for KafkaStudio {
                                                         "Imported truststore: {truststore}"
                                                     ))
                                                     .child("Local CA: not selected")
+                                                    .when_some(certificate_hint(conn), |this, message| {this.child(div().child(message))})
                                             });
                                         this.child(
                                                 div()
@@ -610,7 +714,7 @@ impl Render for KafkaStudio {
                                                         window,
                                                         cx,
                                                     ))
-                                                    .children(connection_rows)
+                                                    .child(div().id("import-preview-scroll").max_h(px(180.0)).overflow_y_scroll().children(connection_rows))
                                                     .child(
                                                         div()
                                                             .flex()
@@ -698,18 +802,7 @@ pub(super) fn connection_list(
                 .cursor_pointer()
                 .child("+ New connection")
                 .on_click(cx.listener(|this, _event, window, cx| {
-                    this.add_connection(window, cx);
-                })),
-        )
-        .child(
-            div()
-                .id("delete-connection")
-                .flex_shrink_0()
-                .p_2()
-                .cursor_pointer()
-                .child("- Delete selected")
-                .on_click(cx.listener(|this, _event, window, cx| {
-                    this.delete_connection(window, cx);
+                    this.add_connection(None, window, cx);
                 })),
         )
         .child(
@@ -760,17 +853,43 @@ pub(super) fn connection_list(
                 } => {
                     let folder = &folders[folder_index];
                     let folder_id = folder.id.clone();
+                    let delete_folder_id = folder.id.clone();
                     let collapsed = collapsed_folders.contains(&folder_id);
                     let arrow = if collapsed { "▶" } else { "▼" };
                     connection_rows = connection_rows.child(
                         div()
                             .id(("connection-folder", folder_index))
+                            .flex()
+                            .items_center()
+                            .gap_2()
                             .flex_shrink_0()
                             .p_2()
                             .pl(px(8.0 + depth as f32 * 16.0))
                             .text_color(rgb(0x94a3b8))
                             .cursor_pointer()
-                            .child(format!("{arrow} {}", folder.name))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(format!("{arrow} {}", folder.name)),
+                            )
+                            .child(
+                                div()
+                                    .id(("delete-folder", folder_index))
+                                    .flex_shrink_0()
+                                    .px_2()
+                                    .cursor_pointer()
+                                    .child("-")
+                                    .on_click(cx.listener(move |this, _event, window, cx| {
+                                        // 删除按钮不触发整行的折叠操作。
+                                        cx.stop_propagation();
+                                        this.request_delete_folder(
+                                            delete_folder_id.clone(),
+                                            window,
+                                            cx,
+                                        );
+                                    })),
+                            )
                             .on_click(cx.listener(move |this, _event, window, cx| {
                                 this.focus_handle.focus(window);
                                 if !this.collapsed_folders.remove(&folder_id) {
@@ -789,9 +908,13 @@ pub(super) fn connection_list(
                     connection_index,
                     depth,
                 } => {
-                    let connection = &connections[connection_index];
+                    let connection: &Connection = &connections[connection_index];
+                    let folder_id = connection.folder_id.clone();
                     connection_rows = connection_rows.child(
                         div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
                             .id(("connection", connection_index))
                             .flex_shrink_0()
                             .bg(if selected_connection == Some(connection_index) {
@@ -802,7 +925,37 @@ pub(super) fn connection_list(
                             .p_2()
                             .pl(px(8.0 + depth as f32 * 16.0))
                             .cursor_pointer()
-                            .child(connection.name.clone())
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(connection.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .id(("add-sibling-connection", connection_index))
+                                    .flex_shrink_0()
+                                    .px_2()
+                                    .cursor_pointer()
+                                    .child("+")
+                                    .on_click(cx.listener(move |this, _event, window, cx| {
+                                        // 阻止点击继续传给整行
+                                        cx.stop_propagation();
+                                        this.add_connection(folder_id.clone(), window, cx);
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id(("delete-connection", connection_index))
+                                    .flex_shrink_0()
+                                    .px_2()
+                                    .cursor_pointer()
+                                    .child("-")
+                                    .on_click(cx.listener(move |this, _event, window, cx| {
+                                        cx.stop_propagation();
+                                        this.delete_connection(connection_index, window, cx);
+                                    }))
+                            )
                             .on_click(cx.listener(move |this, _event, window, cx| {
                                 this.focus_handle.focus(window);
                                 this.select_connection(Some(connection_index), window, cx);
@@ -829,6 +982,29 @@ pub(super) fn connection_list(
             })),
     );
     list
+}
+
+/// 根据导入来源提示证书迁移事项；不访问文件，也不判断 TLS 是否有效。
+fn certificate_hint(conn: &Connection) -> Option<&'static str> {
+    if conn.ca_location.is_some() {
+        return None;
+    }
+    if let Some(truststore_location) = conn.truststore_location.as_deref() {
+        let truststore_location = truststore_location.trim();
+        if truststore_location.is_empty() {
+            return None;
+        }
+        if truststore_location.to_ascii_lowercase().ends_with(".jks") {
+            return Some(
+                "Certificate migration pending: export the JKS CA certificates to PEM, then select the local CA file.",
+            );
+        } else {
+            return Some(
+                "Certificate mapping pending: select the corresponding local PEM CA file.",
+            );
+        }
+    }
+    None
 }
 
 /// 展示已保存配置，独立于编辑草稿；详情及空状态均允许选择复制。
@@ -891,6 +1067,14 @@ pub(super) fn connection_workspace(
                     cx,
                 ))
                 .child(selectable_text("workspace-ca", ca_description, window, cx))
+                .when_some(certificate_hint(conection), |this, message| {
+                    this.child(selectable_text(
+                        "workspace-certificate-hint",
+                        message,
+                        window,
+                        cx,
+                    ))
+                })
                 .child(selectable_text(
                     "workspace-status",
                     "Status: not connected",
@@ -902,7 +1086,7 @@ pub(super) fn connection_workspace(
     // 只读输入框依赖父容器宽度，不会像普通文字一样撑开自动宽度的容器。
     div()
         .flex()
-        .flex_1()
+        .flex_shrink_0()
         .min_w_0()
         .p_6()
         .child(content.w_full().min_w_0())

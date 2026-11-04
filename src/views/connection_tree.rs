@@ -57,15 +57,38 @@ fn append_rows(
     }
 }
 
+/// 收集指定目录及所有后代的 ID，不受侧栏折叠状态影响。
+pub(super) fn collect_folder_subtree_ids(
+    folders: &[ConnectionFolder],
+    root_id: &ConnectionFolderId,
+) -> HashSet<ConnectionFolderId> {
+    let mut ids = HashSet::new();
+    let mut pending = vec![root_id];
+
+    while let Some(folder_id) = pending.pop() {
+        // 已处理过的目录无需再次展开。
+        if !ids.insert(folder_id.clone()) {
+            continue;
+        }
+
+        for folder in folders {
+            if folder.parent_id.as_ref() == Some(folder_id) {
+                pending.push(&folder.id);
+            }
+        }
+    }
+
+    ids
+}
+
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-
-    use super::build_connection_rows;
+    use super::{build_connection_rows, collect_folder_subtree_ids};
     use crate::{
         enums::ConnectionTreeRow::{Connection as ConnectionRow, Folder},
         models::{Connection, ConnectionFolder, ConnectionFolderId},
     };
+    use std::collections::HashSet;
 
     #[test]
     fn builds_nested_rows_and_preserves_connection_indices() {
@@ -202,5 +225,42 @@ mod tests {
                 },
             ]
         )
+    }
+
+    #[test]
+    fn collects_subtree_without_unrelated_folders() {
+        let root_id = ConnectionFolderId("root".to_owned());
+        let child_id = ConnectionFolderId("child".to_owned());
+        let grandchild_id = ConnectionFolderId("grandchild".to_owned());
+        let unrelated_id = ConnectionFolderId("unrelated".to_owned());
+
+        // 故意将后代放在父目录之前，验证收集结果不依赖存储顺序。
+        let folders = vec![
+            ConnectionFolder {
+                id: grandchild_id.clone(),
+                name: "Grandchild".to_owned(),
+                parent_id: Some(child_id.clone()),
+            },
+            ConnectionFolder {
+                id: child_id.clone(),
+                name: "Child".to_owned(),
+                parent_id: Some(root_id.clone()),
+            },
+            ConnectionFolder {
+                id: root_id.clone(),
+                name: "Root".to_owned(),
+                parent_id: None,
+            },
+            ConnectionFolder {
+                id: unrelated_id,
+                name: "Unrelated".to_owned(),
+                parent_id: None,
+            },
+        ];
+
+        let actual = collect_folder_subtree_ids(&folders, &root_id);
+        let expected = HashSet::from([root_id, child_id, grandchild_id]);
+
+        assert_eq!(actual, expected);
     }
 }
