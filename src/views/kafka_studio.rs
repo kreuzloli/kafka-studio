@@ -6,7 +6,11 @@ use gpui::{
     App, Div, Entity, FocusHandle, KeyDownEvent, PathPromptOptions, PromptLevel, ScrollHandle,
     Window, div, prelude::*, px, rgb, rgba,
 };
-use gpui_component::input::{InputState, TextInput};
+use gpui_component::{
+    button::{Button, ButtonVariants},
+    input::{InputState, TextInput},
+    popup_menu::PopupMenuExt,
+};
 
 use crate::{
     components::selectable_text,
@@ -15,6 +19,8 @@ use crate::{
     models::{Connection, ConnectionFolder, ConnectionFolderId, ImportPreview},
     views::connection_tree,
 };
+// 点击 New folder  → 触发 NewFolder → 视图收到动作 → 调用 add_folder
+gpui::actions!(kafka_studio, [NewFolder, NewConnection]);
 
 /// 根视图保存交互状态，子布局根据这些状态生成界面。
 #[derive(Debug)]
@@ -47,6 +53,14 @@ pub struct KafkaStudio {
     import_pending: bool,
     /// 导入操作的提示，与连接编辑错误分开。
     import_error: Option<&'static str>,
+    /// 新增菜单对应的父目录；None 表示根层级。
+    add_menu_parent_id: Option<ConnectionFolderId>,
+    /// 正在重命名的目录；None 表示未进入编辑状态。
+    renaming_folder_id: Option<ConnectionFolderId>,
+    /// 文件夹名称草稿，与连接名称输入框独立。
+    folder_name_input: Entity<InputState>,
+    /// 重命名校验提示。
+    folder_name_error: Option<&'static str>,
 }
 
 impl KafkaStudio {
@@ -61,6 +75,10 @@ impl KafkaStudio {
         let bootstrap_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("localhost:9092"));
         eprintln!("[kafka-studio] event=view_initialized selected=None expanded=true");
+
+        let folder_name_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Enter a folder name"));
+
         let development_id = ConnectionFolderId("development".to_owned());
         Self {
             selected_connection: None,
@@ -100,6 +118,10 @@ impl KafkaStudio {
             import_preview: None,
             import_pending: false,
             import_error: None,
+            add_menu_parent_id: None,
+            renaming_folder_id: None,
+            folder_name_input,
+            folder_name_error: None,
         }
     }
 
@@ -243,6 +265,28 @@ impl KafkaStudio {
 
         self.select_connection(Some(index), window, cx);
         eprintln!("[kafka-studio] event=connection_saved index={index}");
+    }
+
+    /// 新增目录并展开其父目录，保留当前连接选择和编辑草稿。
+    fn add_folder(&mut self, parent_id: Option<ConnectionFolderId>, cx: &mut Context<Self>) {
+        let mut number = self.folders.len() + 1;
+        let mut name = format!("New folder {number}");
+        while self.folders.iter().any(|folder| folder.name == name) {
+            number += 1;
+            name = format!("New folder {number}");
+        }
+        // 先借用父目录 ID 展开目录，再将所有权移入新目录。
+        if let Some(id) = parent_id.as_ref() {
+            self.collapsed_folders.remove(id);
+        }
+        self.folders.push(ConnectionFolder {
+            id: ConnectionFolderId(uuid::Uuid::new_v4().to_string()),
+            name,
+            parent_id,
+        });
+        self.expanded = true;
+        eprintln!("[kafka-studio] event=folder_added");
+        cx.notify();
     }
 
     /// 添加当前会话的连接配置，生成未被占用的默认名称并选中新行。
@@ -523,6 +567,77 @@ impl KafkaStudio {
         self.import_error = None;
         cx.notify();
     }
+
+    /// 在菜单指定的父目录下新增文件夹。
+    fn handle_new_folder(&mut self, _: &NewFolder, _window: &mut Window, cx: &mut Context<Self>) {
+        let parent_id = self.add_menu_parent_id.clone();
+        self.add_folder(parent_id, cx);
+    }
+
+    /// 在菜单指定的目录下新增连接，并展开该目录。
+    fn handle_new_connection(
+        &mut self,
+        _: &NewConnection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let folder_id = self.add_menu_parent_id.clone();
+        if let Some(id) = folder_id.as_ref() {
+            self.collapsed_folders.remove(id);
+        }
+        self.add_connection(folder_id, window, cx);
+    }
+
+    /// 将目录名称加载为草稿，进入编辑时不修改已保存名称。
+    fn begin_rename_folder(
+        &mut self,
+        folder_id: ConnectionFolderId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(folder) = self.folders.iter().find(|folder| folder.id == folder_id) else {
+            return;
+        };
+        let name = folder.name.clone();
+        self.renaming_folder_id = Some(folder_id);
+        self.folder_name_error = None;
+        self.folder_name_input.update(cx, |input, cx| {
+            input.set_value(name, window, cx);
+            input.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    /// 校验名称后更新目录，目录 ID 和子项归属保持不变。
+    fn save_folder_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(folder_id) = self.renaming_folder_id.as_ref() else {
+            return;
+        };
+        let value = self.folder_name_input.read(cx).value();
+        let name = value.trim();
+        if name.is_empty() {
+            self.folder_name_error = Some("Folder name cannot be empty");
+            cx.notify();
+            return;
+        }
+        if let Some(folder) = self
+            .folders
+            .iter_mut()
+            .find(|folder| &folder.id == folder_id)
+        {
+            folder.name = name.to_owned();
+            eprintln!("[kafka-studio] event=folder_renamed");
+        }
+        self.cancel_rename_folder(window, cx);
+    }
+
+    /// 退出名称编辑；草稿未写入目录，因此取消无需恢复旧名称。
+    fn cancel_rename_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.renaming_folder_id = None;
+        self.folder_name_error = None;
+        self.focus_handle.focus(window);
+        cx.notify();
+    }
 }
 
 impl Render for KafkaStudio {
@@ -594,6 +709,8 @@ impl Render for KafkaStudio {
             .track_focus(&self.focus_handle)
             // 传入方法而非调用方法，由 listener 在事件到来时取得可变实体。
             .on_key_down(cx.listener(Self::handle_key_down))
+            .on_action(cx.listener(Self::handle_new_folder))
+            .on_action(cx.listener(Self::handle_new_connection))
             .size_full()
             .flex()
             .flex_col()
@@ -623,6 +740,8 @@ impl Render for KafkaStudio {
                                 &self.sidebar_scroll,
                                 &self.folders,
                                 &self.collapsed_folders,
+                                self.renaming_folder_id.as_ref(),
+                                &self.folder_name_input
                             )),
                     )
                     .child(
@@ -785,7 +904,25 @@ pub(super) fn connection_list(
     scroll_handle: &ScrollHandle,
     folders: &[ConnectionFolder],
     collapsed_folders: &HashSet<ConnectionFolderId>,
+    renaming_folder_id: Option<&ConnectionFolderId>,
+    folder_name_input: &Entity<InputState>,
 ) -> Div {
+    let studio = cx.entity().downgrade();
+    let root_add_button =
+        Button::new("add-root")
+            .text()
+            .label("+")
+            .popup_menu(move |menu, _window, cx| {
+                let Ok(focus_handle) = studio.update(cx, |this, _cx| {
+                    this.add_menu_parent_id = None;
+                    this.focus_handle.clone()
+                }) else {
+                    return menu;
+                };
+                menu.action_context(focus_handle)
+                    .menu("New folder", Box::new(NewFolder))
+                    .menu("New connection", Box::new(NewConnection))
+            });
     let mut list = div()
         .flex()
         .flex_col()
@@ -796,45 +933,40 @@ pub(super) fn connection_list(
         .child(format!("Connections ({})", connections.len()))
         .child(
             div()
-                .id("add-connection")
+                .flex()
+                .items_center()
+                .gap_2()
                 .flex_shrink_0()
                 .p_2()
-                .cursor_pointer()
-                .child("+ New connection")
-                .on_click(cx.listener(|this, _event, window, cx| {
-                    this.add_connection(None, window, cx);
-                })),
-        )
-        .child(
-            div()
-                .id("folder")
-                .flex_shrink_0()
-                .p_2()
-                .cursor_pointer()
-                .child(if expanded {
-                    "▼ All connections"
-                } else {
-                    "▶ All connections"
-                })
-                .on_click(cx.listener(|this, _event, window, cx| {
-                    this.focus_handle.focus(window);
-                    this.expanded = !this.expanded;
-                    eprintln!(
-                        "[kafka-studio] event=folder_clicked expanded={}",
-                        this.expanded
-                    );
-                    cx.notify();
-                })),
+                .child(
+                    div()
+                        .id("folder")
+                        .flex_1()
+                        .min_w_0()
+                        .cursor_pointer()
+                        .child(if expanded {
+                            "▼ All connections"
+                        } else {
+                            "▶ All connections"
+                        })
+                        .on_click(cx.listener(|this, _evnet, window, cx| {
+                            this.focus_handle.focus(window);
+                            this.expanded = !this.expanded;
+                            cx.notify();
+                        })),
+                )
+                .child(root_add_button),
         );
     if expanded {
         let mut connection_rows = div()
             .id("connection-rows-scroll")
             .flex()
             .flex_col()
+            .items_start() // 不再把每一行横向拉伸成固定的列表宽度，让长行按内容扩展。
             .flex_1()
             .min_h_0()
             .pl(px(16.0))
-            .overflow_y_scroll()
+            .overflow_scroll()
             .track_scroll(scroll_handle);
         let rows = connection_tree::build_connection_rows(folders, connections, collapsed_folders);
         if rows.is_empty() {
@@ -842,7 +974,7 @@ pub(super) fn connection_list(
                 div()
                     .p_2()
                     .text_color(rgb(0x94a3b8))
-                    .child("No connections. Click + New connection."),
+                    .child("No connections. Click + beside All connections."),
             );
         }
         for row in rows {
@@ -856,12 +988,60 @@ pub(super) fn connection_list(
                     let delete_folder_id = folder.id.clone();
                     let collapsed = collapsed_folders.contains(&folder_id);
                     let arrow = if collapsed { "▶" } else { "▼" };
+
+                    let rename_folder_id = folder.id.clone();
+                    let is_renaming = renaming_folder_id == Some(&folder.id);
+
+                    let folder_label = div()
+                        .flex_grow()
+                        .flex_shrink_0()
+                        .when(is_renaming, |this| {
+                            this.child(div().w(px(160.0)).child(TextInput::new(folder_name_input)))
+                        })
+                        .when(!is_renaming, |this| {
+                            this.child(
+                                div()
+                                    .id(("folder-label", folder_index))
+                                    .whitespace_nowrap()
+                                    .cursor_pointer()
+                                    .child(folder.name.clone())
+                                    .on_click(cx.listener(
+                                        move |this, event: &gpui::ClickEvent, window, cx| {
+                                            if event.click_count() == 2 {
+                                                this.begin_rename_folder(
+                                                    rename_folder_id.clone(),
+                                                    window,
+                                                    cx,
+                                                );
+                                            }
+                                        },
+                                    )),
+                            )
+                        });
+
+                    let studio = cx.entity().downgrade();
+                    let add_folder_id = folder.id.clone();
+                    let folder_add_button = Button::new(("add-folder-child", folder_index))
+                        .text()
+                        .label("+")
+                        .popup_menu(move |menu, _window, cx| {
+                            let Ok(focus_handle) = studio.update(cx, |this, _cx| {
+                                this.add_menu_parent_id = Some(add_folder_id.clone());
+                                this.focus_handle.clone()
+                            }) else {
+                                return menu;
+                            };
+                            menu.action_context(focus_handle)
+                                .menu("New folder", Box::new(NewFolder))
+                                .menu("New connection", Box::new(NewConnection))
+                        });
                     connection_rows = connection_rows.child(
                         div()
                             .id(("connection-folder", folder_index))
                             .flex()
                             .items_center()
                             .gap_2()
+                            .min_w_full()
                             .flex_shrink_0()
                             .p_2()
                             .pl(px(8.0 + depth as f32 * 16.0))
@@ -869,10 +1049,20 @@ pub(super) fn connection_list(
                             .cursor_pointer()
                             .child(
                                 div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .child(format!("{arrow} {}", folder.name)),
+                                    .id(("folder-toggle", folder_index))
+                                    .flex_shrink_0()
+                                    .cursor_pointer()
+                                    .child(arrow)
+                                    .on_click(cx.listener(move |this, _event, window, cx| {
+                                        this.focus_handle.focus(window);
+                                        if !this.collapsed_folders.remove(&folder_id) {
+                                            this.collapsed_folders.insert(folder_id.clone());
+                                        }
+                                        cx.notify();
+                                    })),
                             )
+                            .child(folder_label)
+                            .child(folder_add_button)
                             .child(
                                 div()
                                     .id(("delete-folder", folder_index))
@@ -889,19 +1079,7 @@ pub(super) fn connection_list(
                                             cx,
                                         );
                                     })),
-                            )
-                            .on_click(cx.listener(move |this, _event, window, cx| {
-                                this.focus_handle.focus(window);
-                                if !this.collapsed_folders.remove(&folder_id) {
-                                    this.collapsed_folders.insert(folder_id.clone());
-                                }
-                                eprintln!(
-                                    "[kafka-studio] event=folder_toggled id={:?} collapsed={}",
-                                    folder_id,
-                                    this.collapsed_folders.contains(&folder_id)
-                                );
-                                cx.notify();
-                            })),
+                            ),
                     );
                 }
                 ConnectionTreeRow::Connection {
@@ -909,13 +1087,13 @@ pub(super) fn connection_list(
                     depth,
                 } => {
                     let connection: &Connection = &connections[connection_index];
-                    let folder_id = connection.folder_id.clone();
                     connection_rows = connection_rows.child(
                         div()
+                            .id(("connection", connection_index))
                             .flex()
                             .items_center()
                             .gap_2()
-                            .id(("connection", connection_index))
+                            .min_w_full() // 短行仍至少铺满列表，保留整行选中背景。
                             .flex_shrink_0()
                             .bg(if selected_connection == Some(connection_index) {
                                 rgba(0x334155e6)
@@ -927,22 +1105,10 @@ pub(super) fn connection_list(
                             .cursor_pointer()
                             .child(
                                 div()
-                                    .flex_1()
-                                    .min_w_0()
+                                    .flex_grow() // 名称较短时占用剩余空间。
+                                    .flex_shrink_0() // 名称较长时不被强制压缩。
+                                    .whitespace_nowrap() // 文字始终保持单行。
                                     .child(connection.name.clone()),
-                            )
-                            .child(
-                                div()
-                                    .id(("add-sibling-connection", connection_index))
-                                    .flex_shrink_0()
-                                    .px_2()
-                                    .cursor_pointer()
-                                    .child("+")
-                                    .on_click(cx.listener(move |this, _event, window, cx| {
-                                        // 阻止点击继续传给整行
-                                        cx.stop_propagation();
-                                        this.add_connection(folder_id.clone(), window, cx);
-                                    })),
                             )
                             .child(
                                 div()
