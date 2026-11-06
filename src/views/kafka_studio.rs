@@ -1,6 +1,6 @@
 //! 只读客户端的 Demo 外壳：连接选择、目录折叠与键盘导航。
 
-use std::{collections::HashSet, fs};
+use std::{collections::HashSet, fs, time::Duration};
 
 use gpui::{
     App, Div, Entity, FocusHandle, KeyDownEvent, PathPromptOptions, PromptLevel, ScrollHandle,
@@ -8,7 +8,7 @@ use gpui::{
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
-    input::{InputState, TextInput},
+    input::{Escape, InputEvent, InputState, TextInput},
     popup_menu::PopupMenuExt,
 };
 
@@ -61,6 +61,8 @@ pub struct KafkaStudio {
     folder_name_input: Entity<InputState>,
     /// 重命名校验提示。
     folder_name_error: Option<&'static str>,
+    fake_query_pending: bool,
+    fake_query_result: Option<&'static str>,
 }
 
 impl KafkaStudio {
@@ -78,6 +80,18 @@ impl KafkaStudio {
 
         let folder_name_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Enter a folder name"));
+
+        // 输入框处理 Enter 后，通过事件通知根视图保存草稿。
+        cx.subscribe_in(
+            &folder_name_input,
+            window,
+            |this, _input, event: &InputEvent, window: &mut Window, cx| {
+                if let InputEvent::PressEnter { .. } = event {
+                    this.save_folder_name(window, cx);
+                }
+            },
+        )
+        .detach();
 
         let development_id = ConnectionFolderId("development".to_owned());
         Self {
@@ -122,6 +136,8 @@ impl KafkaStudio {
             renaming_folder_id: None,
             folder_name_input,
             folder_name_error: None,
+            fake_query_pending: false,
+            fake_query_result: None,
         }
     }
 
@@ -195,6 +211,8 @@ impl KafkaStudio {
     ) {
         self.form_error = None;
         self.selected_connection = selected;
+        self.fake_query_pending = false;
+        self.fake_query_result = None;
         let (name, bootstrap_servers) = match selected {
             Some(index) => {
                 let connection: &Connection = &self.connections[index];
@@ -638,6 +656,22 @@ impl KafkaStudio {
         self.focus_handle.focus(window);
         cx.notify();
     }
+
+    fn start_fake_query(&mut self, cx: &mut Context<Self>) {
+        self.fake_query_pending = true;
+        self.fake_query_result = None;
+        cx.notify();
+        let timer = cx.background_executor().timer(Duration::from_secs(1));
+        cx.spawn(async move |this, cx| {
+            timer.await;
+            let _ = this.update(cx, |studio, cx| {
+                studio.fake_query_pending = false;
+                studio.fake_query_result = Some("Fake query completed");
+                cx.notify();
+            });
+        })
+        .detach();
+    }
 }
 
 impl Render for KafkaStudio {
@@ -741,7 +775,8 @@ impl Render for KafkaStudio {
                                 &self.folders,
                                 &self.collapsed_folders,
                                 self.renaming_folder_id.as_ref(),
-                                &self.folder_name_input
+                                &self.folder_name_input,
+                                self.folder_name_error
                             )),
                     )
                     .child(
@@ -757,6 +792,8 @@ impl Render for KafkaStudio {
                             .child(connection_workspace(
                                 selected_connection,
                                 &self.folders,
+                                self.fake_query_pending,
+                                self.fake_query_result,
                                 window,
                                 cx,
                             ))
@@ -906,6 +943,7 @@ pub(super) fn connection_list(
     collapsed_folders: &HashSet<ConnectionFolderId>,
     renaming_folder_id: Option<&ConnectionFolderId>,
     folder_name_input: &Entity<InputState>,
+    folder_name_error: Option<&'static str>,
 ) -> Div {
     let studio = cx.entity().downgrade();
     let root_add_button =
@@ -996,7 +1034,25 @@ pub(super) fn connection_list(
                         .flex_grow()
                         .flex_shrink_0()
                         .when(is_renaming, |this| {
-                            this.child(div().w(px(160.0)).child(TextInput::new(folder_name_input)))
+                            this.child(
+                                div()
+                                    .w(px(160.0))
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .on_action(cx.listener(|this, _: &Escape, window, cx| {
+                                        this.cancel_rename_folder(window, cx);
+                                    }))
+                                    .child(TextInput::new(folder_name_input))
+                                    .when_some(folder_name_error, |this, message| {
+                                        this.child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(rgb(0xef4444))
+                                                .child(message),
+                                        )
+                                    }),
+                            )
                         })
                         .when(!is_renaming, |this| {
                             this.child(
@@ -1177,9 +1233,18 @@ fn certificate_hint(conn: &Connection) -> Option<&'static str> {
 pub(super) fn connection_workspace(
     conection: Option<&Connection>,
     folders: &[ConnectionFolder],
+    fake_query_pending: bool,
+    fake_query_result: Option<&'static str>,
     window: &mut Window,
-    cx: &mut App,
+    cx: &mut Context<KafkaStudio>,
 ) -> Div {
+    let run_fake_query_button = Button::new("run-fake-query")
+        .cursor_pointer()
+        .text()
+        .label("Run Fake Query")
+        .on_click(cx.listener(move |this, _event, window, cx| {
+            this.start_fake_query(cx);
+        }));
     let content = match conection {
         None => div().child(selectable_text(
             "workspace-empty",
@@ -1247,6 +1312,11 @@ pub(super) fn connection_workspace(
                     window,
                     cx,
                 ))
+                .child(run_fake_query_button)
+                .when(fake_query_pending, |this| {
+                    this.child("Waiting for Fake query…")
+                })
+                .when_some(fake_query_result, |this, message| this.child(message))
         }
     };
     // 只读输入框依赖父容器宽度，不会像普通文字一样撑开自动宽度的容器。
