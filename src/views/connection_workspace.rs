@@ -35,6 +35,7 @@ pub(super) fn connection_workspace(
     run_fast_query: Button,
     run_slow_query: Button,
     cancel_fake_query: Button,
+    read_metadata: Button,
     folders: &[ConnectionFolder],
     fake_query_pending: bool,
     fake_query_result: Option<&'static str>,
@@ -114,6 +115,7 @@ pub(super) fn connection_workspace(
                         .gap_2()
                         .child(run_slow_query)
                         .child(run_fast_query)
+                        .child(read_metadata)
                         .when(fake_query_pending, |this| this.child(cancel_fake_query)),
                 )
                 .when(fake_query_pending, |this| {

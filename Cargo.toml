@@ -13,3 +13,4 @@ quick-xml = "0.42.0"
 uuid = { version = "1.29.0", features = ["v4"] }
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 async-channel = "2"
+rdkafka = { version = "=0.39.0", features = ["cmake-build", "ssl"] }

@@ -698,6 +698,19 @@ impl KafkaStudio {
         })
         .detach();
     }
+
+    /// Record a metadata request for the selected saved connection; no network call is made yet.
+    fn read_metadata(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+        let Some(index) = self.selected_connection else {
+            return;
+        };
+        let connection = &self.connections[index];
+        // Log only the stable ID so credentials and broker addresses stay out of diagnostics.
+        eprintln!(
+            "[kafka-studio] event=metadata_requested connection_id={}",
+            connection.id
+        );
+    }
 }
 
 impl Render for KafkaStudio {
@@ -706,6 +719,13 @@ impl Render for KafkaStudio {
         let selected_connection = self
             .selected_connection
             .map(|index| &self.connections[index]);
+        let read_metadata = Button::new("read-metadata")
+            .cursor_pointer()
+            .text()
+            .label("Read Metadata")
+            .on_click(cx.listener(move |this, _event, window, cx| {
+                this.read_metadata(window, cx);
+            }));
         let run_fast_query = Button::new("run-fast-query")
             .cursor_pointer()
             .text()
@@ -843,6 +863,7 @@ impl Render for KafkaStudio {
                                 run_fast_query,
                                 run_slow_query,
                                 cancel_fake_query,
+                                read_metadata,
                                 &self.folders,
                                 self.fake_query_pending,
                                 self.fake_query_result,
