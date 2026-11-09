@@ -2,9 +2,10 @@
 
 use std::{collections::HashSet, fs, time::Duration};
 
+use async_channel::{Receiver, Sender};
 use gpui::{
-    App, Div, Entity, FocusHandle, KeyDownEvent, PathPromptOptions, PromptLevel, ScrollHandle,
-    Window, div, prelude::*, px, rgb, rgba,
+    Div, Entity, FocusHandle, KeyDownEvent, PathPromptOptions, PromptLevel, ScrollHandle, Window,
+    div, prelude::*, px, rgb, rgba,
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
@@ -17,7 +18,7 @@ use crate::{
     enums::ConnectionTreeRow,
     imports,
     models::{Connection, ConnectionFolder, ConnectionFolderId, ImportPreview},
-    views::connection_tree,
+    views::{connection_tree, connection_workspace},
 };
 // 点击 New folder  → 触发 NewFolder → 视图收到动作 → 调用 add_folder
 gpui::actions!(kafka_studio, [NewFolder, NewConnection]);
@@ -63,6 +64,10 @@ pub struct KafkaStudio {
     folder_name_error: Option<&'static str>,
     fake_query_pending: bool,
     fake_query_result: Option<&'static str>,
+    /// 每次启动查询或切换连接时递增，使旧请求的结果失效。
+    fake_query_request_id: u64,
+    /// 在视图存活期间持续驱动后台任务，避免每次查询创建运行时。
+    runtime: tokio::runtime::Runtime,
 }
 
 impl KafkaStudio {
@@ -138,6 +143,11 @@ impl KafkaStudio {
             folder_name_error: None,
             fake_query_pending: false,
             fake_query_result: None,
+            fake_query_request_id: 0,
+            runtime: tokio::runtime::Builder::new_multi_thread()
+                .enable_time()
+                .build()
+                .expect("Cannot initialize background runtime"),
         }
     }
 
@@ -213,6 +223,7 @@ impl KafkaStudio {
         self.selected_connection = selected;
         self.fake_query_pending = false;
         self.fake_query_result = None;
+        self.fake_query_request_id += 1;
         let (name, bootstrap_servers) = match selected {
             Some(index) => {
                 let connection: &Connection = &self.connections[index];
@@ -657,18 +668,33 @@ impl KafkaStudio {
         cx.notify();
     }
 
-    fn start_fake_query(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn start_fake_query(
+        &mut self,
+        delay: Duration,
+        result: &'static str,
+        cx: &mut Context<Self>,
+    ) {
         self.fake_query_pending = true;
         self.fake_query_result = None;
+        self.fake_query_request_id += 1;
+        let request_id = self.fake_query_request_id;
         cx.notify();
-        let timer = cx.background_executor().timer(Duration::from_secs(1));
+        let (sender, receiver): (Sender<&str>, Receiver<&str>) = async_channel::bounded(1);
+        self.runtime.spawn(async move {
+            tokio::time::sleep(delay).await;
+            let _ = sender.send(result).await;
+        });
         cx.spawn(async move |this, cx| {
-            timer.await;
-            let _ = this.update(cx, |studio, cx| {
-                studio.fake_query_pending = false;
-                studio.fake_query_result = Some("Fake query completed");
-                cx.notify();
-            });
+            if let Ok(result) = receiver.recv().await {
+                let _ = this.update(cx, |studio, cx| {
+                    if studio.fake_query_request_id != request_id {
+                        return;
+                    }
+                    studio.fake_query_pending = false;
+                    studio.fake_query_result = Some(result);
+                    cx.notify();
+                });
+            }
         })
         .detach();
     }
@@ -680,6 +706,29 @@ impl Render for KafkaStudio {
         let selected_connection = self
             .selected_connection
             .map(|index| &self.connections[index]);
+        let run_fast_query = Button::new("run-fast-query")
+            .cursor_pointer()
+            .text()
+            .label("Run Fast Query")
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                this.start_fake_query(Duration::from_secs(1), "Fast query completed", cx);
+            }));
+        let run_slow_query = Button::new("run-slow-query")
+            .cursor_pointer()
+            .text()
+            .label("Run Slow Query")
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                this.start_fake_query(Duration::from_secs(3), "Slow query completed", cx);
+            }));
+        let cancel_fake_query = Button::new("cancel-fake-query")
+            .cursor_pointer()
+            .text()
+            .label("Cancel Fake Query")
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                this.fake_query_request_id += 1;
+                this.fake_query_pending = false;
+                cx.notify();
+            }));
         // 将按钮行单独构建，避免事件回调淹没主布局的容器层级。
         let connection_actions = div()
             .flex()
@@ -789,8 +838,11 @@ impl Render for KafkaStudio {
                             .min_h_0()
                             .min_w_0()
                             .overflow_y_scroll()
-                            .child(connection_workspace(
+                            .child(connection_workspace::connection_workspace(
                                 selected_connection,
+                                run_fast_query,
+                                run_slow_query,
+                                cancel_fake_query,
                                 &self.folders,
                                 self.fake_query_pending,
                                 self.fake_query_result,
@@ -853,7 +905,7 @@ impl Render for KafkaStudio {
                                                         "Imported truststore: {truststore}"
                                                     ))
                                                     .child("Local CA: not selected")
-                                                    .when_some(certificate_hint(conn), |this, message| {this.child(div().child(message))})
+                                                    .when_some(connection_workspace::certificate_hint(conn), |this, message| {this.child(div().child(message))})
                                             });
                                         this.child(
                                                 div()
@@ -1204,126 +1256,4 @@ pub(super) fn connection_list(
             })),
     );
     list
-}
-
-/// 根据导入来源提示证书迁移事项；不访问文件，也不判断 TLS 是否有效。
-fn certificate_hint(conn: &Connection) -> Option<&'static str> {
-    if conn.ca_location.is_some() {
-        return None;
-    }
-    if let Some(truststore_location) = conn.truststore_location.as_deref() {
-        let truststore_location = truststore_location.trim();
-        if truststore_location.is_empty() {
-            return None;
-        }
-        if truststore_location.to_ascii_lowercase().ends_with(".jks") {
-            return Some(
-                "Certificate migration pending: export the JKS CA certificates to PEM, then select the local CA file.",
-            );
-        } else {
-            return Some(
-                "Certificate mapping pending: select the corresponding local PEM CA file.",
-            );
-        }
-    }
-    None
-}
-
-/// 展示已保存配置，独立于编辑草稿；详情及空状态均允许选择复制。
-pub(super) fn connection_workspace(
-    conection: Option<&Connection>,
-    folders: &[ConnectionFolder],
-    fake_query_pending: bool,
-    fake_query_result: Option<&'static str>,
-    window: &mut Window,
-    cx: &mut Context<KafkaStudio>,
-) -> Div {
-    let run_fake_query_button = Button::new("run-fake-query")
-        .cursor_pointer()
-        .text()
-        .label("Run Fake Query")
-        .on_click(cx.listener(move |this, _event, window, cx| {
-            this.start_fake_query(cx);
-        }));
-    let content = match conection {
-        None => div().child(selectable_text(
-            "workspace-empty",
-            "Select a connection",
-            window,
-            cx,
-        )),
-        Some(conection) => {
-            let folder_name = match conection.folder_id.as_ref() {
-                None => "Root",
-                Some(folder_id) => folders
-                    .iter()
-                    .find(|f| &f.id == folder_id)
-                    .map(|f| f.name.as_str())
-                    .unwrap_or("Unknown folder"),
-            };
-            let ca_description = match conection.ca_location.as_deref() {
-                Some(path) => format!("CA file: {} (TLS not verified)", path.display()),
-                None => String::from("CA file: not selected"),
-            };
-            let truststore_description = match conection.truststore_location.as_deref() {
-                Some(path) => format!("Imported truststore: {path}"),
-                None => String::from("Imported truststore: not provided"),
-            };
-            div()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(selectable_text(
-                    "workspace-folder",
-                    format!("Folder: {folder_name}"),
-                    window,
-                    cx,
-                ))
-                .child(selectable_text(
-                    "workspace-name",
-                    conection.name.clone(),
-                    window,
-                    cx,
-                ))
-                .child(selectable_text(
-                    "workspace-bootstrap",
-                    format!("Bootstrap servers: {}", conection.bootstrap_servers),
-                    window,
-                    cx,
-                ))
-                .child(selectable_text(
-                    "workspace-truststore",
-                    truststore_description,
-                    window,
-                    cx,
-                ))
-                .child(selectable_text("workspace-ca", ca_description, window, cx))
-                .when_some(certificate_hint(conection), |this, message| {
-                    this.child(selectable_text(
-                        "workspace-certificate-hint",
-                        message,
-                        window,
-                        cx,
-                    ))
-                })
-                .child(selectable_text(
-                    "workspace-status",
-                    "Status: not connected",
-                    window,
-                    cx,
-                ))
-                .child(run_fake_query_button)
-                .when(fake_query_pending, |this| {
-                    this.child("Waiting for Fake query…")
-                })
-                .when_some(fake_query_result, |this, message| this.child(message))
-        }
-    };
-    // 只读输入框依赖父容器宽度，不会像普通文字一样撑开自动宽度的容器。
-    div()
-        .flex()
-        .flex_shrink_0()
-        .min_w_0()
-        .p_6()
-        .child(content.w_full().min_w_0())
 }

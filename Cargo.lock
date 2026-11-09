@@ -3165,10 +3165,12 @@ dependencies = [
 name = "kafka-studio"
 version = "0.1.0"
 dependencies = [
+ "async-channel 2.5.0",
  "gpui",
  "gpui-component",
  "keyring",
  "quick-xml 0.42.0",
+ "tokio",
  "uuid",
 ]
 
