@@ -105,6 +105,7 @@ mod tests {
             }),
             truststore_location: None,
             ca_location: None,
+            security: None,
         };
         remember_password(&conn)?;
         conn.clear_credentials();

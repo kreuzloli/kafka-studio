@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::models::{ConnectionFolderId, ScramCredentials};
+use crate::models::{ConnectionFolderId, ConnectionSecurity, ScramCredentials};
 
 /// 本地连接配置；保存名称和地址不代表已经建立网络连接。
 #[derive(Debug)]
@@ -17,6 +17,8 @@ pub(crate) struct Connection {
     pub(crate) truststore_location: Option<String>,
     /// 用户选择的本机 PEM CA 路径；设置路径不代表已验证证书或连接。
     pub(crate) ca_location: Option<PathBuf>,
+    /// Required security mode; None means unspecified, not PLAINTEXT.
+    pub(crate) security: Option<ConnectionSecurity>,
 }
 
 impl Connection {
@@ -66,7 +68,7 @@ impl Connection {
 #[cfg(test)]
 mod tests {
 
-    use crate::models::{ConnectionFolderId, ScramCredentials, SecretString};
+    use crate::models::{ConnectionFolderId, ConnectionSecurity, ScramCredentials, SecretString};
 
     use super::Connection;
 
@@ -115,6 +117,7 @@ mod tests {
             }),
             truststore_location: None,
             ca_location: None,
+            security: Some(ConnectionSecurity::SaslSslScramSha512),
         };
         // 调用 clear_credentials。
         conn.clear_credentials();
@@ -126,5 +129,8 @@ mod tests {
             conn.folder_id,
             Some(ConnectionFolderId("folder-1".to_string()))
         );
+        assert_eq!(conn.security, Some(ConnectionSecurity::SaslSslScramSha512));
+        conn.clear_credentials();
+        assert_eq!(conn.security, Some(ConnectionSecurity::SaslSslScramSha512));
     }
 }

@@ -5,6 +5,7 @@ mod components;
 mod credentials;
 mod enums;
 mod imports;
+mod kafka;
 mod models;
 mod utils;
 pub mod views;

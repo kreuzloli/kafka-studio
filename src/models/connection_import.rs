@@ -1,4 +1,4 @@
-use crate::models::ScramCredentials;
+use crate::models::{ConnectionSecurity, ScramCredentials};
 
 /// XML 中的目录记录；ID 只在本次导入文件内有意义。
 pub(crate) struct ImportedFolder {
@@ -29,6 +29,8 @@ pub(crate) struct ImportedConnection {
     pub(crate) credentials: Option<ScramCredentials>,
     /// XML 中的原始信任库路径；导入后仍需确认或映射到本机资源。
     pub(crate) truststore_location: Option<String>,
+    /// Required security mode; None means unspecified, not PLAINTEXT.
+    pub(crate) security: Option<ConnectionSecurity>,
 }
 
 impl ImportedConnection {
@@ -41,6 +43,7 @@ impl ImportedConnection {
             folder_name_hint: None,
             credentials: None,
             truststore_location: None,
+            security: None,
         }
     }
 }

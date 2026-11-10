@@ -12,8 +12,8 @@ use crate::{
     enums::ImportError,
     imports::authentication,
     models::{
-        Connection, ConnectionFolder, ConnectionFolderId, ConnectionImport, ImportPreview,
-        ImportedConnection, ImportedFolder,
+        Connection, ConnectionFolder, ConnectionFolderId, ConnectionImport, ConnectionSecurity,
+        ImportPreview, ImportedConnection, ImportedFolder,
     },
 };
 
@@ -78,6 +78,7 @@ pub(crate) fn parse_connection(
         (Some(protocol), Some(mechanism), Some(jaas)) => {
             let credentials = authentication::parse_authentication(&protocol, &mechanism, &jaas)
                 .map_err(ImportError::Authentication)?;
+            conn.security = Some(ConnectionSecurity::SaslSslScramSha512);
             conn.credentials = Some(credentials);
         }
         _ => return Err(ImportError::IncompleteAuthentication),
@@ -267,6 +268,7 @@ fn convert_import(imported: ConnectionImport) -> (Vec<ConnectionFolder>, Vec<Con
             credentials: conn.credentials,
             truststore_location: conn.truststore_location,
             ca_location: None,
+            security: conn.security,
         });
     }
 

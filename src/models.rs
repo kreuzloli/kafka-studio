@@ -12,3 +12,5 @@ mod secret_string;
 pub(crate) use secret_string::SecretString;
 mod import_preview;
 pub(crate) use import_preview::ImportPreview;
+mod connection_security;
+pub(crate) use connection_security::ConnectionSecurity;

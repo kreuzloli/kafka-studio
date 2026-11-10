@@ -3,7 +3,7 @@ use gpui_component::button::Button;
 
 use crate::{
     components::selectable_text,
-    models::{Connection, ConnectionFolder},
+    models::{Connection, ConnectionFolder, ConnectionSecurity},
 };
 
 /// 根据导入来源提示证书迁移事项；不访问文件，也不判断 TLS 是否有效。
@@ -31,18 +31,19 @@ pub(super) fn certificate_hint(conn: &Connection) -> Option<&'static str> {
 
 /// 展示已保存配置，独立于编辑草稿；详情及空状态均允许选择复制。
 pub(super) fn connection_workspace(
-    conection: Option<&Connection>,
+    connection: Option<&Connection>,
     run_fast_query: Button,
     run_slow_query: Button,
     cancel_fake_query: Button,
     read_metadata: Button,
+    metadata_error: Option<&'static str>,
     folders: &[ConnectionFolder],
     fake_query_pending: bool,
     fake_query_result: Option<&'static str>,
     window: &mut Window,
     cx: &mut App,
 ) -> Div {
-    let content = match conection {
+    let content = match connection {
         None => div().child(selectable_text(
             "workspace-empty",
             "Select a connection",
@@ -66,6 +67,12 @@ pub(super) fn connection_workspace(
                 Some(path) => format!("Imported truststore: {path}"),
                 None => String::from("Imported truststore: not provided"),
             };
+            let security_description = match conection.security {
+                Some(ConnectionSecurity::SaslSslScramSha512) => {
+                    "Security: SASL_SSL / SCRAM-SHA-512"
+                }
+                None => "Security: not specified",
+            };
             div()
                 .flex()
                 .flex_col()
@@ -85,6 +92,12 @@ pub(super) fn connection_workspace(
                 .child(selectable_text(
                     "workspace-bootstrap",
                     format!("Bootstrap servers: {}", conection.bootstrap_servers),
+                    window,
+                    cx,
+                ))
+                .child(selectable_text(
+                    "workspace-security",
+                    security_description,
                     window,
                     cx,
                 ))
@@ -118,6 +131,14 @@ pub(super) fn connection_workspace(
                         .child(read_metadata)
                         .when(fake_query_pending, |this| this.child(cancel_fake_query)),
                 )
+                .when_some(metadata_error, |this, message| {
+                    this.child(selectable_text(
+                        "workspace-metadata-error",
+                        message,
+                        window,
+                        cx,
+                    ))
+                })
                 .when(fake_query_pending, |this| {
                     this.child("Waiting for Fake query…")
                 })

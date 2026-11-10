@@ -16,7 +16,7 @@ use gpui_component::{
 use crate::{
     components::selectable_text,
     enums::ConnectionTreeRow,
-    imports,
+    imports, kafka,
     models::{Connection, ConnectionFolder, ConnectionFolderId, ImportPreview},
     views::{connection_tree, connection_workspace},
 };
@@ -68,6 +68,8 @@ pub struct KafkaStudio {
     fake_query_request_id: u64,
     /// 在视图存活期间持续驱动后台任务，避免每次查询创建运行时。
     runtime: tokio::runtime::Runtime,
+    /// Explains why the current metadata request cannot proceed.
+    metadata_error: Option<&'static str>,
 }
 
 impl KafkaStudio {
@@ -112,6 +114,7 @@ impl KafkaStudio {
                     credentials: None,
                     truststore_location: None,
                     ca_location: None,
+                    security: None,
                 },
                 Connection {
                     id: uuid::Uuid::new_v4().to_string(),
@@ -121,6 +124,7 @@ impl KafkaStudio {
                     credentials: None,
                     truststore_location: None,
                     ca_location: None,
+                    security: None,
                 },
             ],
             name_input,
@@ -148,6 +152,7 @@ impl KafkaStudio {
                 .enable_time()
                 .build()
                 .expect("Cannot initialize background runtime"),
+            metadata_error: None,
         }
     }
 
@@ -220,6 +225,7 @@ impl KafkaStudio {
         cx: &mut Context<Self>,
     ) {
         self.form_error = None;
+        self.metadata_error = None;
         self.selected_connection = selected;
         self.fake_query_pending = false;
         self.fake_query_result = None;
@@ -341,6 +347,7 @@ impl KafkaStudio {
             credentials: None,
             truststore_location: None,
             ca_location: None,
+            security: None,
         });
 
         self.expanded = true;
@@ -699,17 +706,29 @@ impl KafkaStudio {
         .detach();
     }
 
-    /// Record a metadata request for the selected saved connection; no network call is made yet.
-    fn read_metadata(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+    /// Prepare configuration and display missing settings without starting a client.
+    fn read_metadata(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(index) = self.selected_connection else {
             return;
         };
         let connection = &self.connections[index];
-        // Log only the stable ID so credentials and broker addresses stay out of diagnostics.
+        self.metadata_error = None;
+
+        let _config = match kafka::build_client_config(connection) {
+            Ok(config) => config,
+            Err(message) => {
+                self.metadata_error = Some(message);
+                cx.notify();
+                return;
+            }
+        };
+
+        // Configuration preparation does not verify certificates or connectivity.
         eprintln!(
-            "[kafka-studio] event=metadata_requested connection_id={}",
+            "[kafka-studio] event=metadata_config_prepared connection_id={}",
             connection.id
         );
+        cx.notify();
     }
 }
 
@@ -864,6 +883,7 @@ impl Render for KafkaStudio {
                                 run_slow_query,
                                 cancel_fake_query,
                                 read_metadata,
+                                self.metadata_error,
                                 &self.folders,
                                 self.fake_query_pending,
                                 self.fake_query_result,

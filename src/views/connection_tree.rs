@@ -122,6 +122,7 @@ mod tests {
                 credentials: None,
                 truststore_location: None,
                 ca_location: None,
+                security: None,
             },
             Connection {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -131,6 +132,7 @@ mod tests {
                 credentials: None,
                 truststore_location: None,
                 ca_location: None,
+                security: None,
             },
             Connection {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -140,6 +142,7 @@ mod tests {
                 credentials: None,
                 truststore_location: None,
                 ca_location: None,
+                security: None,
             },
         ];
         let mut collapsed_folders = HashSet::<ConnectionFolderId>::new();
