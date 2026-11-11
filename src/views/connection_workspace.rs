@@ -37,6 +37,9 @@ pub(super) fn connection_workspace(
     cancel_fake_query: Button,
     read_metadata: Button,
     metadata_error: Option<&'static str>,
+    metadata_result: Option<&str>,
+    cancel_metadata: Button,
+    metadata_pending: bool,
     folders: &[ConnectionFolder],
     fake_query_pending: bool,
     fake_query_result: Option<&'static str>,
@@ -129,12 +132,21 @@ pub(super) fn connection_workspace(
                         .child(run_slow_query)
                         .child(run_fast_query)
                         .child(read_metadata)
+                        .when(metadata_pending, |this| this.child(cancel_metadata))
                         .when(fake_query_pending, |this| this.child(cancel_fake_query)),
                 )
                 .when_some(metadata_error, |this, message| {
                     this.child(selectable_text(
                         "workspace-metadata-error",
                         message,
+                        window,
+                        cx,
+                    ))
+                })
+                .when_some(metadata_result, |this, message| {
+                    this.child(selectable_text(
+                        "workspace-metadata-result",
+                        message.to_owned(),
                         window,
                         cx,
                     ))

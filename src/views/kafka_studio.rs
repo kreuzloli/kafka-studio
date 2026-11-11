@@ -70,6 +70,12 @@ pub struct KafkaStudio {
     runtime: tokio::runtime::Runtime,
     /// Explains why the current metadata request cannot proceed.
     metadata_error: Option<&'static str>,
+    /// Feedback from the current connection's metadata action.
+    metadata_result: Option<String>,
+    /// Prevent repeated clicks while the current metadata request is running.
+    metadata_pending: bool,
+    /// Reject results belonging to an earlier request or connection selection.
+    metadata_request_id: u64,
 }
 
 impl KafkaStudio {
@@ -153,6 +159,9 @@ impl KafkaStudio {
                 .build()
                 .expect("Cannot initialize background runtime"),
             metadata_error: None,
+            metadata_result: None,
+            metadata_pending: false,
+            metadata_request_id: 0,
         }
     }
 
@@ -226,6 +235,9 @@ impl KafkaStudio {
     ) {
         self.form_error = None;
         self.metadata_error = None;
+        self.metadata_result = None;
+        self.metadata_pending = false;
+        self.metadata_request_id += 1;
         self.selected_connection = selected;
         self.fake_query_pending = false;
         self.fake_query_result = None;
@@ -706,15 +718,19 @@ impl KafkaStudio {
         .detach();
     }
 
-    /// Prepare configuration and display missing settings without starting a client.
+    /// Read metadata on a background worker and apply only the current request's result.
     fn read_metadata(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.metadata_pending {
+            return;
+        }
         let Some(index) = self.selected_connection else {
             return;
         };
         let connection = &self.connections[index];
         self.metadata_error = None;
+        self.metadata_result = None;
 
-        let _config = match kafka::build_client_config(connection) {
+        let config = match kafka::build_client_config(connection) {
             Ok(config) => config,
             Err(message) => {
                 self.metadata_error = Some(message);
@@ -723,12 +739,52 @@ impl KafkaStudio {
             }
         };
 
-        // Configuration preparation does not verify certificates or connectivity.
-        eprintln!(
-            "[kafka-studio] event=metadata_config_prepared connection_id={}",
-            connection.id
-        );
+        self.metadata_pending = true;
+        self.metadata_request_id += 1;
+        let request_id = self.metadata_request_id;
+        self.metadata_result = Some("Reading metadata…".to_owned());
         cx.notify();
+        let (sender, receiver) = async_channel::bounded(1);
+        self.runtime.spawn_blocking(move || {
+            let result = kafka::fetch_metadata_summary(config);
+            // The view may have closed before the worker finishes.
+            let _ = sender.send_blocking(result);
+        });
+        cx.spawn(async move |this, cx| {
+            let result = receiver.recv().await;
+            let _ = this.update(cx, |studio, cx| {
+                // A connection change makes this request's result obsolete.
+                if studio.metadata_request_id != request_id {
+                    return;
+                }
+                studio.metadata_pending = false;
+                studio.metadata_result = None;
+
+                match result {
+                    Ok(Ok((brokers, topics))) => {
+                        studio.metadata_result = Some(format!(
+                            "Metadata received: {brokers} brokers, {topics} topic entries."
+                        ));
+                    }
+                    Ok(Err(error)) => {
+                        // Avoid printing error text that may contain connection details.
+                        eprintln!(
+                            "[kafka-studio] event=metadata_query_failed code={:?}",
+                            error.rdkafka_error_code()
+                        );
+                        studio.metadata_error = Some(
+                            "Could not read metadata. Check connectivity, credentials, and CA.",
+                        );
+                    }
+                    Err(_) => {
+                        studio.metadata_error =
+                            Some("The metadata worker ended without returning a result.");
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 }
 
@@ -744,6 +800,21 @@ impl Render for KafkaStudio {
             .label("Read Metadata")
             .on_click(cx.listener(move |this, _event, window, cx| {
                 this.read_metadata(window, cx);
+            }));
+        let cancel_metadata = Button::new("cancel-metadata")
+            .cursor_pointer()
+            .text()
+            .label("Cancel Metadata")
+            .on_click(cx.listener(|this, _event, _window, cx| {
+                // Invalidate the result; the blocking worker continues until it returns.
+                this.metadata_request_id += 1;
+                this.metadata_pending = false;
+                this.metadata_error = None;
+                this.metadata_result = Some(
+                    "Metadata request cancelled. The background task may still be finishing."
+                        .to_owned(),
+                );
+                cx.notify();
             }));
         let run_fast_query = Button::new("run-fast-query")
             .cursor_pointer()
@@ -884,6 +955,9 @@ impl Render for KafkaStudio {
                                 cancel_fake_query,
                                 read_metadata,
                                 self.metadata_error,
+                                self.metadata_result.as_deref(),
+                                cancel_metadata,
+                                self.metadata_pending,
                                 &self.folders,
                                 self.fake_query_pending,
                                 self.fake_query_result,

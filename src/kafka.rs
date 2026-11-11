@@ -1,10 +1,17 @@
-use rdkafka::ClientConfig;
+use std::time::Duration;
+
+use rdkafka::{
+    ClientConfig,
+    consumer::{BaseConsumer, Consumer},
+    error::KafkaError,
+};
 
 use crate::models::{Connection, ConnectionSecurity};
 
 /// Map supported saved settings into a Kafka client configuration.
 /// Checks required fields without reading certificates or opening a connection.
 pub(crate) fn build_client_config(connection: &Connection) -> Result<ClientConfig, &'static str> {
+    validate_kafka_features()?;
     let mut config = ClientConfig::new();
     match connection.security {
         Some(ConnectionSecurity::SaslSslScramSha512) => {
@@ -33,5 +40,36 @@ pub(crate) fn build_client_config(connection: &Connection) -> Result<ClientConfi
         }
     }
     config.set("bootstrap.servers", connection.bootstrap_servers.as_str());
+    // Metadata inspection must not create topics or commit consumer offsets.
+    config.set("allow.auto.create.topics", "false");
+    config.set("enable.auto.commit", "false");
+
+    // Validate property names and values without starting a Kafka client.
+    config.create_native_config().map_err(|error| {
+        // Native configuration errors can contain passwords; log only the key and code.
+        if let KafkaError::ClientConfig(code, _, key, _) = &error {
+            eprintln!("[kafka-studio] event=metadata_config_rejected key={key} code={code:?}");
+        }
+        "The Kafka library rejected a configuration setting."
+    })?;
     Ok(config)
+}
+
+/// Fetch broker and topic-entry counts on a blocking background worker.
+/// The timeout bounds metadata fetching, not the entire client lifecycle.
+pub(crate) fn fetch_metadata_summary(config: ClientConfig) -> Result<(usize, usize), KafkaError> {
+    let consumer = config.create::<BaseConsumer>()?;
+    // None requests metadata without restricting it to one named topic.
+    let metadata = consumer.fetch_metadata(None, Duration::from_secs(5))?;
+    Ok((metadata.brokers().len(), metadata.topics().len()))
+}
+
+/// Check required native-library capabilities without creating a Kafka client.
+fn validate_kafka_features() -> Result<(), &'static str> {
+    let mut config = ClientConfig::new();
+    config.set("builtin.features", "ssl,sasl,sasl_scram");
+    config
+        .create_native_config()
+        .map(|_| ())
+        .map_err(|_| "The Kafka library requires TLS and SASL/SCRAM build support.")
 }
