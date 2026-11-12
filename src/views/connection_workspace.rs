@@ -63,7 +63,10 @@ pub(super) fn connection_workspace(
                     .unwrap_or("Unknown folder"),
             };
             let ca_description = match conection.ca_location.as_deref() {
-                Some(path) => format!("CA file: {} (TLS not verified)", path.display()),
+                Some(path) => format!(
+                    "CA file: {} (selected for metadata requests)",
+                    path.display()
+                ),
                 None => String::from("CA file: not selected"),
             };
             let truststore_description = match conection.truststore_location.as_deref() {
@@ -121,7 +124,7 @@ pub(super) fn connection_workspace(
                 })
                 .child(selectable_text(
                     "workspace-status",
-                    "Status: not connected",
+                    "Mode: one-shot metadata requests",
                     window,
                     cx,
                 ))
@@ -155,6 +158,14 @@ pub(super) fn connection_workspace(
                     this.child("Waiting for Fake query…")
                 })
                 .when_some(fake_query_result, |this, message| this.child(message))
+                .child(div().flex().flex_col().gap_2().mt_4().child("Topic").child(
+                    selectable_text(
+                        "workspace-topics-placeholder",
+                        "Topic list is not loaded yet.",
+                        window,
+                        cx,
+                    ),
+                ))
         }
     };
     // 只读输入框依赖父容器宽度，不会像普通文字一样撑开自动宽度的容器。

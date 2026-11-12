@@ -746,7 +746,14 @@ impl KafkaStudio {
         cx.notify();
         let (sender, receiver) = async_channel::bounded(1);
         self.runtime.spawn_blocking(move || {
+            let started = std::time::Instant::now();
             let result = kafka::fetch_metadata_summary(config);
+            // Measure the full helper call, including client creation and cleanup.
+            eprintln!(
+                "[kafka-studio] event=metadata_worker_finished request_id={request_id} success={} elapsed_ms={}",
+                result.is_ok(),
+                started.elapsed().as_millis()
+            );
             // The view may have closed before the worker finishes.
             let _ = sender.send_blocking(result);
         });
@@ -755,6 +762,9 @@ impl KafkaStudio {
             let _ = this.update(cx, |studio, cx| {
                 // A connection change makes this request's result obsolete.
                 if studio.metadata_request_id != request_id {
+                    eprintln!(
+                        "[kafka-studio] event=metadata_result_discarded request_id={request_id}"
+                    );
                     return;
                 }
                 studio.metadata_pending = false;
@@ -763,18 +773,17 @@ impl KafkaStudio {
                 match result {
                     Ok(Ok((brokers, topics))) => {
                         studio.metadata_result = Some(format!(
-                            "Metadata received: {brokers} brokers, {topics} topic entries."
+                            "SASL_SSL / SCRAM-SHA-512 metadata request succeeded: \
+                             {brokers} brokers, {topics} topic entries."
                         ));
                     }
                     Ok(Err(error)) => {
-                        // Avoid printing error text that may contain connection details.
-                        eprintln!(
-                            "[kafka-studio] event=metadata_query_failed code={:?}",
-                            error.rdkafka_error_code()
-                        );
-                        studio.metadata_error = Some(
-                            "Could not read metadata. Check connectivity, credentials, and CA.",
-                        );
+                         let (message, cause) = match error {
+                            kafka::MetadataError::ClientCreation(cause) => ("Could not create the Kafka client. Check the CA file and client settings.", cause),
+                            kafka::MetadataError::Fetch(cause) =>  ("Could not fetch metadata. Check connectivity, credentials, and CA trust.", cause),
+                        };
+                        eprintln!("[kafka-studio] event=metadata_query_failed code={:?}",cause.rdkafka_error_code());
+                        studio.metadata_error = Some(message);
                     }
                     Err(_) => {
                         studio.metadata_error =

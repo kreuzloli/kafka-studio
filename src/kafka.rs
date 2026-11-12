@@ -8,6 +8,12 @@ use rdkafka::{
 
 use crate::models::{Connection, ConnectionSecurity};
 
+/// Preserve the failure stage and the original Kafka error.
+pub(crate) enum MetadataError {
+    ClientCreation(KafkaError),
+    Fetch(KafkaError),
+}
+
 /// Map supported saved settings into a Kafka client configuration.
 /// Checks required fields without reading certificates or opening a connection.
 pub(crate) fn build_client_config(connection: &Connection) -> Result<ClientConfig, &'static str> {
@@ -57,10 +63,30 @@ pub(crate) fn build_client_config(connection: &Connection) -> Result<ClientConfi
 
 /// Fetch broker and topic-entry counts on a blocking background worker.
 /// The timeout bounds metadata fetching, not the entire client lifecycle.
-pub(crate) fn fetch_metadata_summary(config: ClientConfig) -> Result<(usize, usize), KafkaError> {
-    let consumer = config.create::<BaseConsumer>()?;
+pub(crate) fn fetch_metadata_summary(
+    config: ClientConfig,
+) -> Result<(usize, usize), MetadataError> {
+    let consumer = config
+        .create::<BaseConsumer>()
+        .inspect_err(|err| {
+            // Record the failed stage without exposing connection details.
+            eprintln!(
+                "[kafka-studio] event=metadata_client_creation_failed code={:?}",
+                err.rdkafka_error_code()
+            );
+        })
+        .map_err(MetadataError::ClientCreation)?;
     // None requests metadata without restricting it to one named topic.
-    let metadata = consumer.fetch_metadata(None, Duration::from_secs(5))?;
+    let metadata = consumer
+        .fetch_metadata(None, Duration::from_secs(5))
+        .inspect_err(|err| {
+            // Record the failed stage without exposing connection details.
+            eprintln!(
+                "[kafka-studio] event=metadata_fetch_failed code={:?}",
+                err.rdkafka_error_code()
+            );
+        })
+        .map_err(MetadataError::Fetch)?;
     Ok((metadata.brokers().len(), metadata.topics().len()))
 }
 
