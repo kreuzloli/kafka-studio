@@ -76,6 +76,8 @@ pub struct KafkaStudio {
     metadata_pending: bool,
     /// Reject results belonging to an earlier request or connection selection.
     metadata_request_id: u64,
+    /// Topic entries from the current connection's latest successful request.
+    metadata_topics: Option<Vec<kafka::TopicSummary>>,
 }
 
 impl KafkaStudio {
@@ -162,6 +164,7 @@ impl KafkaStudio {
             metadata_result: None,
             metadata_pending: false,
             metadata_request_id: 0,
+            metadata_topics: None,
         }
     }
 
@@ -242,6 +245,7 @@ impl KafkaStudio {
         self.fake_query_pending = false;
         self.fake_query_result = None;
         self.fake_query_request_id += 1;
+        self.metadata_topics = None;
         let (name, bootstrap_servers) = match selected {
             Some(index) => {
                 let connection: &Connection = &self.connections[index];
@@ -771,11 +775,14 @@ impl KafkaStudio {
                 studio.metadata_result = None;
 
                 match result {
-                    Ok(Ok((brokers, topics))) => {
+                    Ok(Ok(summary)) => {
                         studio.metadata_result = Some(format!(
                             "SASL_SSL / SCRAM-SHA-512 metadata request succeeded: \
-                             {brokers} brokers, {topics} topic entries."
+                                {} brokers, {} topic entries.",
+                            summary.broker_count,
+                            summary.topics.len(),
                         ));
+                        studio.metadata_topics = Some(summary.topics);
                     }
                     Ok(Err(error)) => {
                          let (message, cause) = match error {
@@ -965,6 +972,7 @@ impl Render for KafkaStudio {
                                 read_metadata,
                                 self.metadata_error,
                                 self.metadata_result.as_deref(),
+                                self.metadata_topics.as_deref(),
                                 cancel_metadata,
                                 self.metadata_pending,
                                 &self.folders,

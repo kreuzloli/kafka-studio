@@ -8,6 +8,20 @@ use rdkafka::{
 
 use crate::models::{Connection, ConnectionSecurity};
 
+/// Own the topic data needed after the native metadata is dropped.
+#[derive(Debug)]
+pub(crate) struct TopicSummary {
+    pub(crate) name: String,
+    pub(crate) error: Option<String>,
+}
+
+/// Carry the metadata snapshot from the worker to the UI.
+#[derive(Debug)]
+pub(crate) struct MetadataSummary {
+    pub(crate) broker_count: usize,
+    pub(crate) topics: Vec<TopicSummary>,
+}
+
 /// Preserve the failure stage and the original Kafka error.
 pub(crate) enum MetadataError {
     ClientCreation(KafkaError),
@@ -61,11 +75,11 @@ pub(crate) fn build_client_config(connection: &Connection) -> Result<ClientConfi
     Ok(config)
 }
 
-/// Fetch broker and topic-entry counts on a blocking background worker.
+/// Fetch broker count and topic entries on a blocking background worker.
 /// The timeout bounds metadata fetching, not the entire client lifecycle.
 pub(crate) fn fetch_metadata_summary(
     config: ClientConfig,
-) -> Result<(usize, usize), MetadataError> {
+) -> Result<MetadataSummary, MetadataError> {
     let consumer = config
         .create::<BaseConsumer>()
         .inspect_err(|err| {
@@ -87,7 +101,18 @@ pub(crate) fn fetch_metadata_summary(
             );
         })
         .map_err(MetadataError::Fetch)?;
-    Ok((metadata.brokers().len(), metadata.topics().len()))
+    let topics = metadata
+        .topics()
+        .iter()
+        .map(|topic| TopicSummary {
+            name: topic.name().to_owned(),
+            error: topic.error().map(|err| format!("{err:?}")),
+        })
+        .collect();
+    Ok(MetadataSummary {
+        broker_count: metadata.brokers().len(),
+        topics,
+    })
 }
 
 /// Check required native-library capabilities without creating a Kafka client.

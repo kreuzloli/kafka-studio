@@ -1,8 +1,9 @@
-use gpui::{App, Div, Window, div, prelude::*};
+use gpui::{App, Div, Window, div, prelude::*, px};
 use gpui_component::button::Button;
 
 use crate::{
     components::selectable_text,
+    kafka::TopicSummary,
     models::{Connection, ConnectionFolder, ConnectionSecurity},
 };
 
@@ -38,6 +39,7 @@ pub(super) fn connection_workspace(
     read_metadata: Button,
     metadata_error: Option<&'static str>,
     metadata_result: Option<&str>,
+    metadata_topics: Option<&[TopicSummary]>,
     cancel_metadata: Button,
     metadata_pending: bool,
     folders: &[ConnectionFolder],
@@ -62,6 +64,30 @@ pub(super) fn connection_workspace(
                     .map(|f| f.name.as_str())
                     .unwrap_or("Unknown folder"),
             };
+            let mut topic_list = div()
+                .id("workspace-topic-list")
+                .flex()
+                .flex_col()
+                .gap_2()
+                .max_h(px(240.0))
+                .overflow_y_scroll();
+            match metadata_topics {
+                None => {
+                    topic_list = topic_list.child("Topic list is not loaded yet.");
+                }
+                Some(topics) if topics.is_empty() => {
+                    topic_list = topic_list.child("No topic entries were returned.");
+                }
+                Some(topics) => {
+                    for topic in topics {
+                        let label = match &topic.error {
+                            Some(err) => format!("{} — {err}", topic.name),
+                            None => topic.name.clone(),
+                        };
+                        topic_list = topic_list.child(div().flex_shrink_0().child(label));
+                    }
+                }
+            }
             let ca_description = match conection.ca_location.as_deref() {
                 Some(path) => format!(
                     "CA file: {} (selected for metadata requests)",
@@ -134,7 +160,6 @@ pub(super) fn connection_workspace(
                         .gap_2()
                         .child(run_slow_query)
                         .child(run_fast_query)
-                        .child(read_metadata)
                         .when(metadata_pending, |this| this.child(cancel_metadata))
                         .when(fake_query_pending, |this| this.child(cancel_fake_query)),
                 )
@@ -158,14 +183,16 @@ pub(super) fn connection_workspace(
                     this.child("Waiting for Fake query…")
                 })
                 .when_some(fake_query_result, |this, message| this.child(message))
-                .child(div().flex().flex_col().gap_2().mt_4().child("Topic").child(
-                    selectable_text(
-                        "workspace-topics-placeholder",
-                        "Topic list is not loaded yet.",
-                        window,
-                        cx,
-                    ),
-                ))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .mt_4()
+                        .child("Topics")
+                        .child(div().flex().child(read_metadata))
+                        .child(topic_list),
+                )
         }
     };
     // 只读输入框依赖父容器宽度，不会像普通文字一样撑开自动宽度的容器。
