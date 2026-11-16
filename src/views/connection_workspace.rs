@@ -1,4 +1,6 @@
-use gpui::{App, Div, Window, div, prelude::*, px};
+use std::rc::Rc;
+
+use gpui::{App, Div, Window, div, prelude::*, px, rgba};
 use gpui_component::button::Button;
 
 use crate::{
@@ -45,6 +47,8 @@ pub(super) fn connection_workspace(
     folders: &[ConnectionFolder],
     fake_query_pending: bool,
     fake_query_result: Option<&'static str>,
+    selected_topic: Option<usize>,
+    on_select_topic: Rc<dyn Fn(&usize, &mut Window, &mut App)>,
     window: &mut Window,
     cx: &mut App,
 ) -> Div {
@@ -79,12 +83,26 @@ pub(super) fn connection_workspace(
                     topic_list = topic_list.child("No topic entries were returned.");
                 }
                 Some(topics) => {
-                    for topic in topics {
+                    for (index, topic) in topics.iter().enumerate() {
+                        let on_select = Rc::clone(&on_select_topic);
                         let label = match &topic.error {
                             Some(err) => format!("{} — {err}", topic.name),
                             None => topic.name.clone(),
                         };
-                        topic_list = topic_list.child(div().flex_shrink_0().child(label));
+                        topic_list = topic_list.child(
+                            div()
+                                .id(("topic-row", index))
+                                .flex_shrink_0()
+                                .child(label)
+                                .cursor_pointer()
+                                .when(selected_topic == Some(index), |this| {
+                                    this.bg(rgba(0x334155e6))
+                                })
+                                .on_click(move |_event, window, cx| {
+                                    on_select(&index, window, cx);
+                                    eprintln!("[kafka-studio] event=topic_clicked index={index}");
+                                }),
+                        );
                     }
                 }
             }

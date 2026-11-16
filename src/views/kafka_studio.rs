@@ -1,6 +1,6 @@
 //! 只读客户端的 Demo 外壳：连接选择、目录折叠与键盘导航。
 
-use std::{collections::HashSet, fs, time::Duration};
+use std::{collections::HashSet, fs, rc::Rc, time::Duration};
 
 use async_channel::{Receiver, Sender};
 use gpui::{
@@ -78,6 +78,8 @@ pub struct KafkaStudio {
     metadata_request_id: u64,
     /// Topic entries from the current connection's latest successful request.
     metadata_topics: Option<Vec<kafka::TopicSummary>>,
+    /// selected topic index for metadata_topics
+    selected_topic: Option<usize>,
 }
 
 impl KafkaStudio {
@@ -165,6 +167,7 @@ impl KafkaStudio {
             metadata_pending: false,
             metadata_request_id: 0,
             metadata_topics: None,
+            selected_topic: None,
         }
     }
 
@@ -246,6 +249,7 @@ impl KafkaStudio {
         self.fake_query_result = None;
         self.fake_query_request_id += 1;
         self.metadata_topics = None;
+        self.selected_topic = None;
         let (name, bootstrap_servers) = match selected {
             Some(index) => {
                 let connection: &Connection = &self.connections[index];
@@ -783,6 +787,7 @@ impl KafkaStudio {
                             summary.topics.len(),
                         ));
                         studio.metadata_topics = Some(summary.topics);
+                        studio.selected_topic = None;
                     }
                     Ok(Err(error)) => {
                          let (message, cause) = match error {
@@ -807,6 +812,10 @@ impl KafkaStudio {
 impl Render for KafkaStudio {
     /// 根据当前状态构建布局；渲染可能频繁发生，因此这里不输出交互日志。
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let on_select_topic = Rc::new(cx.listener(|this, index: &usize, _window, cx| {
+            this.selected_topic = Some(*index);
+            cx.notify();
+        }));
         let selected_connection = self
             .selected_connection
             .map(|index| &self.connections[index]);
@@ -978,6 +987,8 @@ impl Render for KafkaStudio {
                                 &self.folders,
                                 self.fake_query_pending,
                                 self.fake_query_result,
+                                self.selected_topic,
+                                on_select_topic,
                                 window,
                                 cx,
                             ))
