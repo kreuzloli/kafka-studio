@@ -75,12 +75,15 @@ pub(super) fn connection_workspace(
                 .gap_2()
                 .max_h(px(240.0))
                 .overflow_y_scroll();
-            match metadata_topics {
+            let mut partition_details = div().flex().flex_col().gap_2().my_4().child("Partitions");
+            let topic_summary = match metadata_topics {
                 None => {
                     topic_list = topic_list.child("Topic list is not loaded yet.");
+                    None::<&TopicSummary>
                 }
                 Some(topics) if topics.is_empty() => {
                     topic_list = topic_list.child("No topic entries were returned.");
+                    None::<&TopicSummary>
                 }
                 Some(topics) => {
                     for (index, topic) in topics.iter().enumerate() {
@@ -104,8 +107,17 @@ pub(super) fn connection_workspace(
                                 }),
                         );
                     }
+                    if let Some(index) = selected_topic {
+                        topics.get(index)
+                    } else {
+                        None::<&TopicSummary>
+                    }
                 }
-            }
+            };
+            partition_details = match topic_summary {
+                Some(topic) => partition_details.child(format!("Topic: {}", topic.name)),
+                None => partition_details.child("Select a Topic to view its partitions."),
+            };
             let ca_description = match conection.ca_location.as_deref() {
                 Some(path) => format!(
                     "CA file: {} (selected for metadata requests)",
@@ -211,6 +223,7 @@ pub(super) fn connection_workspace(
                         .child(div().flex().child(read_metadata))
                         .child(topic_list),
                 )
+                .child(partition_details)
         }
     };
     // 只读输入框依赖父容器宽度，不会像普通文字一样撑开自动宽度的容器。
