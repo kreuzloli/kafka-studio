@@ -13,6 +13,7 @@ use crate::models::{Connection, ConnectionSecurity};
 pub(crate) struct TopicSummary {
     pub(crate) name: String,
     pub(crate) error: Option<String>,
+    pub(crate) partitions: Vec<PartitionSummary>,
 }
 
 /// Carry the metadata snapshot from the worker to the UI.
@@ -26,6 +27,16 @@ pub(crate) struct MetadataSummary {
 pub(crate) enum MetadataError {
     ClientCreation(KafkaError),
     Fetch(KafkaError),
+}
+
+/// Own the partition data needed after the native metadata is dropped.
+#[derive(Debug)]
+pub(crate) struct PartitionSummary {
+    pub(crate) id: i32,
+    pub(crate) leader: i32,
+    pub(crate) replicas: Vec<i32>,
+    pub(crate) isr: Vec<i32>,
+    pub(crate) error: Option<String>,
 }
 
 /// Map supported saved settings into a Kafka client configuration.
@@ -101,12 +112,23 @@ pub(crate) fn fetch_metadata_summary(
             );
         })
         .map_err(MetadataError::Fetch)?;
-    let topics = metadata
+    let topics: Vec<TopicSummary> = metadata
         .topics()
         .iter()
         .map(|topic| TopicSummary {
             name: topic.name().to_owned(),
             error: topic.error().map(|err| format!("{err:?}")),
+            partitions: topic
+                .partitions()
+                .iter()
+                .map(|partition| PartitionSummary {
+                    id: partition.id(),
+                    leader: partition.leader(),
+                    replicas: partition.replicas().to_vec(),
+                    isr: partition.isr().to_vec(),
+                    error: partition.error().map(|err| format!("{err:?}")),
+                })
+                .collect(),
         })
         .collect();
     Ok(MetadataSummary {

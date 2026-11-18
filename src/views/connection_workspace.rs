@@ -115,7 +115,69 @@ pub(super) fn connection_workspace(
                 }
             };
             partition_details = match topic_summary {
-                Some(topic) => partition_details.child(format!("Topic: {}", topic.name)),
+                Some(topic) => {
+                    let details = partition_details.child(format!("Topic: {}", topic.name));
+                    match &topic.error {
+                        Some(err) => details.child(format!("Metadata error: {}", err)),
+                        None => details
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_4()
+                                    .child(div().w(px(90.0)).flex_shrink_0().child("Partition"))
+                                    .child(div().w(px(90.0)).flex_shrink_0().child("Leader"))
+                                    .child(div().w(px(90.0)).flex_shrink_0().child("Replicas"))
+                                    .child(div().w(px(90.0)).flex_shrink_0().child("ISR")),
+                            )
+                            .children(topic.partitions.iter().map(|partition| {
+                                div()
+                                    .flex()
+                                    .gap_4()
+                                    .child(
+                                        div()
+                                            .w(px(90.0))
+                                            .flex_shrink_0()
+                                            .child(partition.id.to_string()),
+                                    )
+                                    .child(div().w(px(90.0)).flex_shrink_0().child(
+                                        if partition.leader == -1 {
+                                            String::from("Unavailable")
+                                        } else {
+                                            partition.leader.to_string()
+                                        },
+                                    ))
+                                    .child(
+                                        div()
+                                            .w(px(90.0))
+                                            .flex_shrink_0()
+                                            .child(format!("{:?}", partition.replicas)),
+                                    )
+                                    .child(
+                                        div()
+                                            .w(px(90.0))
+                                            .flex_shrink_0()
+                                            .child(format!("{:?}", partition.isr)),
+                                    )
+                                    .when_some(partition.error.as_deref(), |row, error| {
+                                        row.child(format!("Partition error: {error}"))
+                                    })
+                            }))
+                            .child(format!("Partitions returned: {}", topic.partitions.len()))
+                            .child(
+                                div()
+                                    .mt_4()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .child("Topic configuration (read-only)")
+                                    .child(
+                                        Button::new("read-topic-config")
+                                            .label("Read Configuration"),
+                                    )
+                                    .child("Configuration has not been loaded yet."),
+                            ),
+                    }
+                }
                 None => partition_details.child("Select a Topic to view its partitions."),
             };
             let ca_description = match conection.ca_location.as_deref() {
