@@ -819,6 +819,17 @@ impl Render for KafkaStudio {
         let selected_connection = self
             .selected_connection
             .map(|index| &self.connections[index]);
+        let read_topic_config = Button::new("read-topic-config")
+            .label("Read Configuration")
+            .on_click(cx.listener(|this, _event, _window, _cx| {
+                if let Some(index) = this.selected_topic {
+                    let selected_topic = this
+                        .metadata_topics
+                        .as_deref()
+                        .and_then(|topics| topics.get(index));
+                    eprintln!("[kafka-studio] event=read_topic_config_clicked index={index}")
+                }
+            }));
         let read_metadata = Button::new("read-metadata")
             .cursor_pointer()
             .text()
@@ -979,6 +990,7 @@ impl Render for KafkaStudio {
                                 run_slow_query,
                                 cancel_fake_query,
                                 read_metadata,
+                                read_topic_config,
                                 self.metadata_error,
                                 self.metadata_result.as_deref(),
                                 self.metadata_topics.as_deref(),

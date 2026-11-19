@@ -39,6 +39,7 @@ pub(super) fn connection_workspace(
     run_slow_query: Button,
     cancel_fake_query: Button,
     read_metadata: Button,
+    read_topic_config: Button,
     metadata_error: Option<&'static str>,
     metadata_result: Option<&str>,
     metadata_topics: Option<&[TopicSummary]>,
@@ -170,10 +171,7 @@ pub(super) fn connection_workspace(
                                     .flex_col()
                                     .gap_2()
                                     .child("Topic configuration (read-only)")
-                                    .child(
-                                        Button::new("read-topic-config")
-                                            .label("Read Configuration"),
-                                    )
+                                    .child(read_topic_config)
                                     .child("Configuration has not been loaded yet."),
                             ),
                     }
