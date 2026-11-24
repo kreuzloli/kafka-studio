@@ -16,7 +16,8 @@ use gpui_component::{
 use crate::{
     components::selectable_text,
     enums::ConnectionTreeRow,
-    imports, kafka,
+    imports,
+    kafka::{self, TopicConfig},
     models::{Connection, ConnectionFolder, ConnectionFolderId, ImportPreview},
     views::{connection_tree, connection_workspace},
 };
@@ -80,6 +81,7 @@ pub struct KafkaStudio {
     metadata_topics: Option<Vec<kafka::TopicSummary>>,
     /// selected topic index for metadata_topics
     selected_topic: Option<usize>,
+    topic_configs: Option<Vec<TopicConfig>>,
 }
 
 impl KafkaStudio {
@@ -168,6 +170,7 @@ impl KafkaStudio {
             metadata_request_id: 0,
             metadata_topics: None,
             selected_topic: None,
+            topic_configs: None,
         }
     }
 
@@ -807,14 +810,32 @@ impl KafkaStudio {
         })
         .detach();
     }
+
+    fn read_topic_config(&self) {
+        if let Some(index) = self.selected_topic {
+            let selected_topic = self
+                .metadata_topics
+                .as_deref()
+                .and_then(|topics| topics.get(index));
+            if let Some(topic) = selected_topic {
+                eprintln!(
+                    "[kafka-studio] event=read_topic_config_clicked index={index}, partitions={}",
+                    topic.partitions.len()
+                )
+            }
+        }
+    }
 }
 
 impl Render for KafkaStudio {
     /// 根据当前状态构建布局；渲染可能频繁发生，因此这里不输出交互日志。
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let on_select_topic = Rc::new(cx.listener(|this, index: &usize, _window, cx| {
-            this.selected_topic = Some(*index);
-            cx.notify();
+            if this.selected_topic != Some(*index) {
+                this.selected_topic = Some(*index);
+                this.topic_configs = None::<Vec<TopicConfig>>;
+                cx.notify();
+            }
         }));
         let selected_connection = self
             .selected_connection
@@ -822,13 +843,7 @@ impl Render for KafkaStudio {
         let read_topic_config = Button::new("read-topic-config")
             .label("Read Configuration")
             .on_click(cx.listener(|this, _event, _window, _cx| {
-                if let Some(index) = this.selected_topic {
-                    let selected_topic = this
-                        .metadata_topics
-                        .as_deref()
-                        .and_then(|topics| topics.get(index));
-                    eprintln!("[kafka-studio] event=read_topic_config_clicked index={index}")
-                }
+                this.read_topic_config();
             }));
         let read_metadata = Button::new("read-metadata")
             .cursor_pointer()

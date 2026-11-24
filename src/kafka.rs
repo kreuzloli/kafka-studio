@@ -16,6 +16,12 @@ pub(crate) struct TopicSummary {
     pub(crate) partitions: Vec<PartitionSummary>,
 }
 
+#[derive(Debug)]
+pub(crate) struct TopicConfig {
+    pub(crate) name: String,
+    pub(crate) value: Option<String>,
+}
+
 /// Carry the metadata snapshot from the worker to the UI.
 #[derive(Debug)]
 pub(crate) struct MetadataSummary {
